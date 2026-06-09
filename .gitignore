@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# Env files (never commit secrets)
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# Service account credentials
+*service-account*.json
+gcp-*.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Temp
+tmp/
+.tmp/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

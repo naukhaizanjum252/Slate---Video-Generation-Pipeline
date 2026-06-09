@@ -1,0 +1,31 @@
+{
+  "name": "@slate/watcher",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js",
+    "test-pipeline": "ts-node scripts/test-pipeline.ts"
+  },
+  "dependencies": {
+    "@slate/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.45.0",
+    "adm-zip": "^0.5.16",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "tmp": "^0.2.3"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.5",
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/tmp": "^0.2.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  }
+}
