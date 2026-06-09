@@ -39,7 +39,11 @@ export interface Config {
     serviceRoleKey: string;
   };
   google: {
-    serviceAccountJson: string;
+    // OAuth user credentials — uploads run as the real account that owns the
+    // Drive folder. (Service accounts have no storage quota on personal Gmail.)
+    oauthClientId: string;
+    oauthClientSecret: string;
+    oauthRefreshToken: string;
   };
   pythonBin: string;
   pollCron: string;
@@ -69,7 +73,9 @@ export function loadConfig(): Config {
       serviceRoleKey: required('SUPABASE_SERVICE_ROLE_KEY'),
     },
     google: {
-      serviceAccountJson: required('GOOGLE_SERVICE_ACCOUNT_JSON'),
+      oauthClientId: required('GOOGLE_OAUTH_CLIENT_ID'),
+      oauthClientSecret: required('GOOGLE_OAUTH_CLIENT_SECRET'),
+      oauthRefreshToken: required('GOOGLE_OAUTH_REFRESH_TOKEN'),
     },
     pythonBin: optional('PYTHON_BIN', 'python3'),
     pollCron: optional('POLL_CRON', '*/60 * * * * *'),

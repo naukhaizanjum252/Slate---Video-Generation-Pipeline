@@ -46,33 +46,37 @@ You'll get three values here: a URL, a `service_role` key, and an `anon` key.
 
 ## Part B — Google Drive (where episode files land)
 
-You'll get two things: a service-account JSON, and (per channel) a Drive folder
-ID. Each channel **must** have its own folder — there's no global default.
+Uploads use **OAuth** (the watcher uploads as you, the real account that owns the
+folder). Service accounts can't store files in a personal Gmail Drive — they have
+no storage quota — so OAuth is required. You'll get three values: an OAuth client
+ID + secret, and a refresh token; plus a Drive folder ID per channel.
 
 1. Go to <https://console.cloud.google.com>. Create a project or pick one.
 2. **APIs & Services → Library** → search **Google Drive API** → **Enable**.
-3. **APIs & Services → Credentials → Create credentials → Service account.**
-   - Name it (e.g. `slate-drive`), click through **Create and continue**, skip
-     the optional role steps, **Done**.
-4. Click the new service account → **Keys** tab → **Add key → Create new key →
-   JSON**. A `.json` file downloads.
-5. Copy the service account's **email**
-   (`slate-drive@your-project.iam.gserviceaccount.com`).
-6. In **Google Drive**, create a folder for each channel's episodes. Right-click
-   each → **Share** → paste the service-account email → **Editor** → send.
-   (Every channel folder must be shared with the service account, or uploads
-   fail.)
-7. Copy each folder's ID from its URL:
-   `https://drive.google.com/drive/folders/`**`THIS_LONG_ID`**. You'll paste this
-   into the channel's **Drive folder ID** field in the dashboard (Part J).
-8. Flatten the JSON to one line:
+3. **APIs & Services → OAuth consent screen** → choose **External** → fill the
+   minimal fields (app name, your email). Add the scope
+   `.../auth/drive`. Then **Publish app** (set Publishing status to *In
+   production*) so the refresh token doesn't expire after 7 days. You can ignore
+   the "verification" prompts for personal use.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID** →
+   Application type **Desktop app** → Create. Copy the **Client ID** and
+   **Client secret** → `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`.
+5. Get the refresh token (run on your Mac — it opens a browser):
    ```bash
-   cat ~/Downloads/your-key.json | jq -c .
+   cd "slate"
+   GOOGLE_OAUTH_CLIENT_ID=xxx GOOGLE_OAUTH_CLIENT_SECRET=yyy \
+     pnpm --filter @slate/watcher get-drive-token
    ```
-   Copy the entire one-line output → `GOOGLE_SERVICE_ACCOUNT_JSON`.
-   (No `jq`? `brew install jq`, or remove the line breaks by hand.)
+   Open the printed URL, approve access (click through the "unverified app"
+   warning: **Advanced → Go to … (unsafe)**). It prints
+   `GOOGLE_OAUTH_REFRESH_TOKEN=…` — copy that value.
+6. In **Google Drive**, create a folder for each channel's episodes. (No sharing
+   needed — uploads run as you, so you already own them.) Copy each folder's ID
+   from its URL: `https://drive.google.com/drive/folders/`**`THIS_LONG_ID`** —
+   you'll paste it into the channel's **Drive folder ID** field (Part J).
 
-> ✅ You now have: `GOOGLE_SERVICE_ACCOUNT_JSON` and a Drive folder ID per channel.
+> ✅ You now have: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+> `GOOGLE_OAUTH_REFRESH_TOKEN`, and a Drive folder ID per channel.
 
 ---
 
@@ -128,8 +132,10 @@ GRADIO_BASE_URL=http://localhost:7860
 SUPABASE_URL=https://xxxxxxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGci...   # the service_role secret
 
-# Google Drive (per-channel folders are set in the dashboard, not here)
-GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"...",...}
+# Google Drive (OAuth — per-channel folders are set in the dashboard)
+GOOGLE_OAUTH_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-...
+GOOGLE_OAUTH_REFRESH_TOKEN=1//0g...
 
 # Pipeline — leave video off for now (asset bundle only)
 ENABLE_BUILD_VIDEO=false
@@ -139,7 +145,7 @@ POLL_CRON=*/60 * * * * *
 ```
 
 Notes:
-- `GOOGLE_SERVICE_ACCOUNT_JSON` is the full JSON on **one line**.
+- The Google values are OAuth (Part B), not a service-account JSON.
 - `SUPABASE_SERVICE_ROLE_KEY` is the **service_role** key, not the anon key.
 - There is no `GOOGLE_DRIVE_PARENT_FOLDER_ID` — each channel's folder is set in
   the dashboard (Part J) and is mandatory.
@@ -299,7 +305,8 @@ source list.
 | `GRADIO_BASE_URL` | `http://localhost:7860` (Part D) |
 | `SUPABASE_URL` | Part A, step 4 (Project URL) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Part A, step 4 (service_role secret) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Part B, step 8 (one-line JSON) |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Part B, step 4 |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | Part B, step 5 |
 | `ENABLE_BUILD_VIDEO` *(optional)* | `false` (asset bundle only) until you want the MP4 |
 | `POLL_CRON` *(optional)* | leave default `*/60 * * * * *` |
 | `PYTHON_BIN` *(optional)* | only if `python3` isn't on PATH |

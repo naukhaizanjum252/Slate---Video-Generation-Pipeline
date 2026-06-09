@@ -32,20 +32,11 @@ export class DriveUploader {
   private readonly drive: drive_v3.Drive;
 
   constructor(cfg: Config['google']) {
-    let credentials: Record<string, unknown>;
-    try {
-      credentials = JSON.parse(cfg.serviceAccountJson);
-    } catch (err) {
-      throw new Error(
-        'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. ' +
-          'Paste the full service-account key JSON on a single line.',
-      );
-    }
-    const auth = new google.auth.GoogleAuth({
-      credentials: credentials as never,
-      scopes: ['https://www.googleapis.com/auth/drive'],
-    });
-    this.drive = google.drive({ version: 'v3', auth });
+    // OAuth as the real Drive owner. googleapis auto-refreshes the access token
+    // from the refresh token, so this works unattended on the server.
+    const oauth2 = new google.auth.OAuth2(cfg.oauthClientId, cfg.oauthClientSecret);
+    oauth2.setCredentials({ refresh_token: cfg.oauthRefreshToken });
+    this.drive = google.drive({ version: 'v3', auth: oauth2 });
   }
 
   /** Create a folder under the given parent and return its id. */
