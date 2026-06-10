@@ -18,6 +18,7 @@ export default function Page() {
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   const [stopping, setStopping] = useState<Set<string>>(new Set());
+  const [errorEp, setErrorEp] = useState<Episode | null>(null);
 
   const load = useCallback(async (manual = false) => {
     if (!supabase) {
@@ -224,6 +225,7 @@ export default function Page() {
                       onStop={stop}
                       stopping={stopping.has(ep.id)}
                       onRemove={removeEpisode}
+                      onShowError={setErrorEp}
                     />
                   ))
                 )}
@@ -236,7 +238,72 @@ export default function Page() {
           Slate · Bodycam Horror Studio pipeline
         </footer>
       </main>
+
+      {errorEp && <ErrorModal ep={errorEp} onClose={() => setErrorEp(null)} />}
     </Shell>
+  );
+}
+
+/* ─────────────────────────── Error modal ─────────────────────────── */
+
+function ErrorModal({ ep, onClose }: { ep: Episode; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(ep.error_message ?? '');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="animate-fade-in relative z-10 flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-hair bg-card shadow-soft">
+        <div className="flex items-start justify-between gap-4 border-b border-hair px-6 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="grid h-6 w-6 place-items-center rounded-lg bg-rose-50 text-rose-600">
+                <IconAlert />
+              </span>
+              <span className="text-sm font-semibold text-ink">Error details</span>
+            </div>
+            <div className="mt-1 truncate text-[12px] text-muted">{ep.card_title}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={copy}
+              className="rounded-lg border border-hair bg-card px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:border-brand/40 hover:text-brand"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="grid h-7 w-7 place-items-center rounded-lg border border-hair bg-card text-muted transition-colors hover:text-ink"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <pre className="overflow-auto whitespace-pre-wrap break-words px-6 py-4 font-mono text-[12px] leading-relaxed text-ink/80">
+          {ep.error_message}
+        </pre>
+      </div>
+    </div>
   );
 }
 
@@ -381,13 +448,14 @@ function Row({
   onStop,
   stopping,
   onRemove,
+  onShowError,
 }: {
   ep: Episode;
   onStop: (ep: Episode) => void;
   stopping: boolean;
   onRemove: (ep: Episode, mode: 'delete' | 'retry') => void;
+  onShowError: (ep: Episode) => void;
 }) {
-  const [showError, setShowError] = useState(false);
   const [open, setOpen] = useState(false);
   const hasTimeline = (ep.timeline?.length ?? 0) > 0;
   return (
@@ -450,17 +518,15 @@ function Row({
           <span className="text-ghost">—</span>
         )}
       </td>
-      <td className="max-w-[260px] px-4 py-4 align-top">
+      <td className="max-w-[240px] px-4 py-4 align-top">
         {ep.error_message ? (
           <button
             type="button"
-            onClick={() => setShowError((v) => !v)}
-            title={showError ? 'Click to collapse' : 'Click to read full error'}
-            className={`text-left text-[13px] text-rose-600 hover:text-rose-700 ${
-              showError ? 'whitespace-pre-wrap break-words' : 'block max-w-full truncate'
-            }`}
+            onClick={() => onShowError(ep)}
+            title="View full error"
+            className="block max-w-full truncate text-left text-[13px] text-rose-600 underline decoration-rose-300 decoration-dotted underline-offset-2 hover:text-rose-700"
           >
-            {ep.error_message}
+            {ep.error_message.split('\n')[0]}
           </button>
         ) : (
           <span className="text-ghost">—</span>
@@ -636,23 +702,24 @@ const PHASE_STATUS_TEXT: Record<PhaseStatus, string> = {
  */
 function EpisodeStepper({ timeline }: { timeline: TimelinePhase[] }) {
   return (
-    <div className="flex items-start overflow-x-auto pb-1">
-      {timeline.map((ph, i) => (
-        <Fragment key={ph.key}>
-          <PhaseColumn phase={ph} index={i} />
-          {i < timeline.length - 1 && (
-            <div
-              className={`mt-[13px] h-0.5 min-w-[24px] flex-1 rounded-full ${
-                ph.status === 'done'
-                  ? 'bg-emerald-400'
-                  : ph.status === 'active'
-                    ? 'bg-brand/40'
-                    : 'bg-hair'
-              }`}
-            />
-          )}
-        </Fragment>
-      ))}
+    <div className="rounded-2xl border border-hair bg-card p-6 shadow-sm">
+      <div className="mb-5 text-[11px] font-semibold uppercase tracking-wider text-ghost">
+        Pipeline
+      </div>
+      <div className="flex items-start overflow-x-auto pb-1">
+        {timeline.map((ph, i) => (
+          <Fragment key={ph.key}>
+            <PhaseColumn phase={ph} index={i} />
+            {i < timeline.length - 1 && (
+              <div
+                className={`mt-[15px] h-[3px] min-w-[16px] flex-1 rounded-full ${
+                  ph.status === 'done' ? 'bg-emerald-400' : 'bg-hair'
+                }`}
+              />
+            )}
+          </Fragment>
+        ))}
+      </div>
     </div>
   );
 }
@@ -667,17 +734,17 @@ function PhaseColumn({ phase, index }: { phase: TimelinePhase; index: number }) 
           ? 'text-rose-600'
           : 'text-ghost';
   return (
-    <div className="flex w-[130px] shrink-0 flex-col items-center px-1 text-center">
+    <div className="flex w-[140px] shrink-0 flex-col items-center px-1.5 text-center">
       <StepNodeCircle status={phase.status} />
-      <div className="mt-2 text-[10px] font-semibold uppercase tracking-wider text-ghost">
+      <div className="mt-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-ghost">
         Step {index + 1}
       </div>
-      <div className="text-[13px] font-semibold text-ink">{phase.label}</div>
-      <div className={`text-[11px] font-medium ${statusColor}`}>
+      <div className="mt-0.5 text-[13px] font-semibold leading-snug text-ink">{phase.label}</div>
+      <div className={`mt-0.5 text-[11px] font-medium ${statusColor}`}>
         {PHASE_STATUS_TEXT[phase.status]}
       </div>
       {phase.steps && phase.steps.length > 0 && (
-        <div className="mt-3 w-full space-y-1.5 text-left">
+        <div className="mt-3 w-full space-y-1 rounded-xl border border-hair bg-sunken/60 p-2.5">
           {phase.steps.map((s) => (
             <SubStepNode key={s.label} step={s} />
           ))}
@@ -690,8 +757,8 @@ function PhaseColumn({ phase, index }: { phase: TimelinePhase; index: number }) 
 function StepNodeCircle({ status }: { status: PhaseStatus }) {
   if (status === 'done') {
     return (
-      <span className="grid h-7 w-7 place-items-center rounded-full bg-emerald-500 text-white shadow-sm">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <span className="grid h-8 w-8 place-items-center rounded-full bg-emerald-500 text-white shadow-sm ring-4 ring-emerald-500/10">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
           <path d="m5 12.5 4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </span>
@@ -699,21 +766,21 @@ function StepNodeCircle({ status }: { status: PhaseStatus }) {
   }
   if (status === 'active') {
     return (
-      <span className="grid h-7 w-7 place-items-center rounded-full border-[3px] border-brand bg-card shadow-sm">
+      <span className="grid h-8 w-8 place-items-center rounded-full border-[3px] border-brand bg-card shadow-sm ring-4 ring-brand/10">
         <span className="h-2.5 w-2.5 animate-pulse-soft rounded-full bg-brand" />
       </span>
     );
   }
   if (status === 'failed') {
     return (
-      <span className="grid h-7 w-7 place-items-center rounded-full bg-rose-500 text-white shadow-sm">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <span className="grid h-8 w-8 place-items-center rounded-full bg-rose-500 text-white shadow-sm ring-4 ring-rose-500/10">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
           <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
         </svg>
       </span>
     );
   }
-  return <span className="h-7 w-7 rounded-full border-2 border-hair bg-card" />;
+  return <span className="h-8 w-8 rounded-full border-2 border-hair bg-card" />;
 }
 
 function SubStepNode({ step }: { step: ProgressStep }) {
@@ -721,14 +788,20 @@ function SubStepNode({ step }: { step: ProgressStep }) {
   const done = isStepDone(step.text) || pct === 100;
   const metric = shortMetric(step.text);
   return (
-    <div className="flex items-center gap-1.5" title={step.text}>
+    <div className="flex items-center gap-2" title={step.text}>
       <span
-        className={`h-2 w-2 shrink-0 rounded-full ${
+        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
           done ? 'bg-emerald-500' : 'animate-pulse-soft bg-brand'
         }`}
       />
-      <span className="text-[11px] font-medium text-ink/80">{step.label}</span>
-      <span className="ml-auto text-[10px] tabular-nums text-ghost">
+      <span className="flex-1 truncate text-left text-[11px] font-medium text-ink/75">
+        {step.label}
+      </span>
+      <span
+        className={`shrink-0 text-[10px] font-medium tabular-nums ${
+          done ? 'text-emerald-600' : 'text-ghost'
+        }`}
+      >
         {done ? '✓' : metric || '…'}
       </span>
     </div>
