@@ -6,6 +6,20 @@ export interface ProgressStep {
   text: string;
 }
 
+export type PhaseStatus = 'pending' | 'active' | 'done' | 'failed';
+
+/**
+ * One phase in an episode's pipeline timeline. Persisted (and kept after the run
+ * finishes) so the dashboard can show a full stepper, including what each step
+ * achieved. `steps` holds parallel sub-tasks (Script / Images / Voiceover).
+ */
+export interface TimelinePhase {
+  key: string;
+  label: string;
+  status: PhaseStatus;
+  steps?: ProgressStep[];
+}
+
 export interface Episode {
   id: string;
   trello_card_id: string;
@@ -22,6 +36,8 @@ export interface Episode {
   stage: string | null;
   /** Concurrent sub-tasks of the current phase, each with its own status text. */
   progress: ProgressStep[] | null;
+  /** Full per-phase pipeline timeline; persists after the run for history. */
+  timeline: TimelinePhase[] | null;
   /** Set by the dashboard's Stop button; the watcher acts on it and cancels. */
   cancel_requested: boolean;
 }
@@ -37,7 +53,10 @@ export interface Channel {
   id: string;
   name: string;
   trello_board_id: string;
+  /** List the watcher polls for new cards. */
   trello_source_list_id: string;
+  /** List a card is moved to when its episode finishes (with a Drive comment). */
+  trello_resolve_list_id: string;
   drive_folder_id: string;
   enabled: boolean;
   created_at: string;

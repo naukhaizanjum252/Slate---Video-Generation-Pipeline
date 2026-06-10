@@ -42,6 +42,26 @@ export class TrelloClient {
     return data;
   }
 
+  /** Move a card to another list (used to move to the resolve list on done). */
+  async moveCard(cardId: string, listId: string): Promise<void> {
+    const url = `${API}/cards/${cardId}`;
+    await axios.put(url, null, {
+      params: { ...this.auth(), idList: listId },
+      timeout: 30_000,
+    });
+    log.info(`Moved card ${cardId} -> list ${listId}`);
+  }
+
+  /** Add a comment to a card (used to post the Drive folder link on done). */
+  async addComment(cardId: string, text: string): Promise<void> {
+    const url = `${API}/cards/${cardId}/actions/comments`;
+    await axios.post(url, null, {
+      params: { ...this.auth(), text },
+      timeout: 30_000,
+    });
+    log.info(`Commented on card ${cardId}`);
+  }
+
   /**
    * Return the URL of the first image attachment on a card, or null.
    * Trello-hosted uploads require the API key/token to download, so we

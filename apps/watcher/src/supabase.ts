@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Channel, Episode, EpisodeStatus, ProgressStep } from '@slate/shared';
+import type { Channel, Episode, EpisodeStatus, ProgressStep, TimelinePhase } from '@slate/shared';
 import { createLogger } from './logger';
 import type { Config } from './config';
 
@@ -64,30 +64,35 @@ export class EpisodeStore {
   }
 
   /** Mark a card cancelled (clears the request flag + live stage). */
-  async markCancelled(trelloCardId: string): Promise<void> {
+  async markCancelled(trelloCardId: string, timeline?: TimelinePhase[]): Promise<void> {
+    const update: Record<string, unknown> = {
+      status: 'cancelled' as EpisodeStatus,
+      stage: null,
+      progress: null,
+      cancel_requested: false,
+      completed_at: new Date().toISOString(),
+    };
+    if (timeline) update.timeline = timeline;
     const { error } = await this.client
       .from('episodes')
-      .update({
-        status: 'cancelled' as EpisodeStatus,
-        stage: null,
-        progress: null,
-        cancel_requested: false,
-        completed_at: new Date().toISOString(),
-      })
+      .update(update)
       .eq('trello_card_id', trelloCardId);
     if (error) throw new Error(`Supabase markCancelled failed: ${error.message}`);
     log.info(`Marked card ${trelloCardId} cancelled`);
   }
 
-  /** Update the live phase + concurrent sub-steps shown on the dashboard. */
+  /** Update the live phase + concurrent sub-steps + full timeline. */
   async updateStage(
     trelloCardId: string,
     stage: string,
     progress: ProgressStep[],
+    timeline?: TimelinePhase[],
   ): Promise<void> {
+    const update: Record<string, unknown> = { stage, progress };
+    if (timeline) update.timeline = timeline;
     const { error } = await this.client
       .from('episodes')
-      .update({ stage, progress })
+      .update(update)
       .eq('trello_card_id', trelloCardId);
     if (error) throw new Error(`Supabase updateStage failed: ${error.message}`);
   }
@@ -103,32 +108,44 @@ export class EpisodeStore {
     return data !== null;
   }
 
-  async markDone(trelloCardId: string, driveFolderUrl: string): Promise<void> {
+  async markDone(
+    trelloCardId: string,
+    driveFolderUrl: string,
+    timeline?: TimelinePhase[],
+  ): Promise<void> {
+    const update: Record<string, unknown> = {
+      status: 'done' as EpisodeStatus,
+      drive_folder_url: driveFolderUrl,
+      completed_at: new Date().toISOString(),
+      error_message: null,
+      stage: null,
+      progress: null,
+    };
+    if (timeline) update.timeline = timeline;
     const { error } = await this.client
       .from('episodes')
-      .update({
-        status: 'done' as EpisodeStatus,
-        drive_folder_url: driveFolderUrl,
-        completed_at: new Date().toISOString(),
-        error_message: null,
-        stage: null,
-        progress: null,
-      })
+      .update(update)
       .eq('trello_card_id', trelloCardId);
     if (error) throw new Error(`Supabase markDone failed: ${error.message}`);
     log.info(`Marked card ${trelloCardId} done`);
   }
 
-  async markFailed(trelloCardId: string, errorMessage: string): Promise<void> {
+  async markFailed(
+    trelloCardId: string,
+    errorMessage: string,
+    timeline?: TimelinePhase[],
+  ): Promise<void> {
+    const update: Record<string, unknown> = {
+      status: 'failed' as EpisodeStatus,
+      error_message: errorMessage.slice(0, 2000),
+      completed_at: new Date().toISOString(),
+      stage: null,
+      progress: null,
+    };
+    if (timeline) update.timeline = timeline;
     const { error } = await this.client
       .from('episodes')
-      .update({
-        status: 'failed' as EpisodeStatus,
-        error_message: errorMessage.slice(0, 2000),
-        completed_at: new Date().toISOString(),
-        stage: null,
-        progress: null,
-      })
+      .update(update)
       .eq('trello_card_id', trelloCardId);
     if (error) throw new Error(`Supabase markFailed failed: ${error.message}`);
     log.info(`Marked card ${trelloCardId} failed`);

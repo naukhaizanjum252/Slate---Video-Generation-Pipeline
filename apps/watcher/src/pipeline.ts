@@ -3,7 +3,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import AdmZip from 'adm-zip';
 import * as tmp from 'tmp';
-import type { PipelineResult, ProgressStep } from '@slate/shared';
+import type { PipelineResult, ProgressStep, PhaseStatus, TimelinePhase } from '@slate/shared';
 import { createLogger } from './logger';
 import { TrelloClient, type TrelloCard, type TrelloAttachment } from './trello';
 import { DriveUploader } from './drive';
@@ -37,6 +37,8 @@ export interface JobChannel {
   id: string;
   name: string;
   driveFolderId: string;
+  /** Trello list to move the card to when done (empty = don't move). */
+  resolveListId: string;
 }
 
 export interface PipelineJob {
@@ -61,6 +63,36 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   // Temp resources to clean up no matter what.
   let imageTmp: tmp.FileResult | null = null;
   let unzipDir: tmp.DirResult | null = null;
+
+  // ── Pipeline timeline ──────────────────────────────────────────────
+  // Ordered phases for this run (build-video only when enabled). Persisted to
+  // Supabase and kept after the run so the dashboard can show a full stepper.
+  const phaseDefs: { key: string; label: string }[] = [
+    { key: 'Downloading reference', label: 'Reference image' },
+    { key: 'Enhancing reference', label: 'Enhance reference' },
+    { key: 'Generating script & assets', label: 'Script & assets' },
+    ...(cfg.enableBuildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
+    { key: 'Packaging files', label: 'Package files' },
+    { key: 'Unpacking bundle', label: 'Unpack bundle' },
+    { key: 'Uploading to Drive', label: 'Upload to Drive' },
+  ];
+  let currentKey = '';
+  const stepsByPhase: Record<string, ProgressStep[]> = {};
+
+  const buildPhase = (key: string, label: string, status: PhaseStatus): TimelinePhase => {
+    const steps = stepsByPhase[key];
+    return steps ? { key, label, status, steps } : { key, label, status };
+  };
+  // Timeline where the current phase carries `curStatus` (active/failed),
+  // earlier phases are done, later ones pending.
+  const timelineWith = (curStatus: PhaseStatus): TimelinePhase[] => {
+    const curIdx = phaseDefs.findIndex((p) => p.key === currentKey);
+    return phaseDefs.map((p, i) =>
+      buildPhase(p.key, p.label, i < curIdx ? 'done' : i === curIdx ? curStatus : 'pending'),
+    );
+  };
+  const timelineAllDone = (): TimelinePhase[] =>
+    phaseDefs.map((p) => buildPhase(p.key, p.label, 'done'));
 
   // Throttled live-status writer. Coalesces rapid progress updates into at most
   // one Supabase write per STAGE_WRITE_MS, dedupes identical payloads, and is
@@ -87,12 +119,14 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     if (key === lastKey) return;
     lastKey = key;
     void store
-      .updateStage(job.cardId, p.phase, p.steps)
+      .updateStage(job.cardId, p.phase, p.steps, timelineWith('active'))
       .catch((e) => log.warn('updateStage failed', e));
   };
 
   const setStage = (phase: string, steps: ProgressStep[] = []) => {
     if (stageClosed || keyOf(phase, steps) === lastKey) return;
+    currentKey = phase;
+    if (steps.length) stepsByPhase[phase] = steps;
     pending = { phase, steps };
     const elapsed = Date.now() - lastWriteAt;
     if (elapsed >= STAGE_WRITE_MS) {
@@ -126,7 +160,7 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
 
     if (!result.success) {
       if (result.error === CANCEL_SENTINEL) {
-        await store.markCancelled(job.cardId);
+        await store.markCancelled(job.cardId, timelineWith('active'));
         log.info(`🛑 Cancelled "${job.cardTitle}" (${job.episodeName})`);
         return;
       }
@@ -135,7 +169,7 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
 
     // Honor a stop requested after generation finished but before upload.
     if (await store.isCancelRequested(job.cardId)) {
-      await store.markCancelled(job.cardId);
+      await store.markCancelled(job.cardId, timelineWith('active'));
       log.info(`🛑 Cancelled "${job.cardTitle}" before upload`);
       return;
     }
@@ -160,16 +194,26 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
       job.channel.driveFolderId,
     );
 
-    // 5. Mark done in Supabase. The Trello card stays in the source list;
-    //    status is reflected on the dashboard, not by moving cards.
-    await store.markDone(job.cardId, driveUrl);
+    // 5. Mark done in Supabase, then move the card to the channel's resolve list
+    //    and post the Drive link as a comment (best-effort — never fail a done).
+    await store.markDone(job.cardId, driveUrl, timelineAllDone());
     log.info(`✅ Completed "${job.cardTitle}" -> ${driveUrl}`);
+    if (job.channel.resolveListId) {
+      try {
+        await trello.moveCard(job.cardId, job.channel.resolveListId);
+        await trello.addComment(job.cardId, `✅ Episode ready — Drive folder: ${driveUrl}`);
+      } catch (e) {
+        log.warn('Failed to move card to resolve list / add comment', e);
+      }
+    } else {
+      log.warn(`[${job.channel.name}] No resolve list configured — card left in source list`);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error(`❌ Pipeline error for "${job.cardTitle}": ${message}`, err);
     // Best-effort failure recording — never let these throw out of here.
     try {
-      await store.markFailed(job.cardId, message);
+      await store.markFailed(job.cardId, message, timelineWith('failed'));
     } catch (e) {
       log.error('Failed to record failure in Supabase', e);
     }

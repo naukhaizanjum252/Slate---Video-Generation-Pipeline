@@ -6,6 +6,7 @@ const REQUIRED: (keyof ChannelInput)[] = [
   'name',
   'trello_board_id',
   'trello_source_list_id',
+  'trello_resolve_list_id',
   'drive_folder_id',
 ];
 
@@ -24,10 +25,18 @@ export function validateChannel(body: unknown): ValidationResult {
     }
   }
 
+  // Source and resolve lists must differ, or a card would move to itself.
+  if (
+    (b.trello_source_list_id as string).trim() === (b.trello_resolve_list_id as string).trim()
+  ) {
+    return { error: 'Source and resolve lists must be different' };
+  }
+
   const value: ChannelInput = {
     name: (b.name as string).trim(),
     trello_board_id: (b.trello_board_id as string).trim(),
     trello_source_list_id: (b.trello_source_list_id as string).trim(),
+    trello_resolve_list_id: (b.trello_resolve_list_id as string).trim(),
     drive_folder_id: (b.drive_folder_id as string).trim(),
     enabled: b.enabled === undefined ? true : Boolean(b.enabled),
   };

@@ -138,6 +138,7 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
         id: channel.id,
         name: channel.name,
         driveFolderId: channel.drive_folder_id,
+        resolveListId: channel.trello_resolve_list_id,
       };
       const episodeName = episodeNameFromCard(card);
 

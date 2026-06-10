@@ -8,23 +8,23 @@
 
 html,
 body {
-  background-color: #f6f8f7;
-  color: #0f1a16;
+  background-color: #e9edf4;
+  color: #0b1f3a;
 }
 
-/* Soft emerald wash in the corners so the page feels designed, not blank white. */
+/* Soft blue wash so the canvas feels designed, like the reference. */
 body {
   background-image:
-    radial-gradient(900px 480px at 88% -8%, rgba(5, 150, 105, 0.06), transparent 70%),
-    radial-gradient(700px 420px at -5% 0%, rgba(5, 150, 105, 0.04), transparent 60%);
+    radial-gradient(1100px 560px at 90% -12%, rgba(47, 111, 237, 0.08), transparent 70%),
+    radial-gradient(820px 480px at -6% 0%, rgba(11, 37, 69, 0.05), transparent 60%);
   background-attachment: fixed;
 }
 
 ::selection {
-  background: rgba(5, 150, 105, 0.16);
+  background: rgba(47, 111, 237, 0.18);
 }
 
-/* Subtle scrollbar that fits the light theme. */
+/* Subtle scrollbar that fits the cool light theme. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -33,9 +33,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d6ddda;
+  background: #cdd6e4;
   border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #c2ccc7;
+  background: #b7c2d6;
 }

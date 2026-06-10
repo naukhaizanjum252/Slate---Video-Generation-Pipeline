@@ -9,6 +9,7 @@ interface FormState {
   name: string;
   trello_board_id: string;
   trello_source_list_id: string;
+  trello_resolve_list_id: string;
   drive_folder_id: string;
   enabled: boolean;
 }
@@ -18,6 +19,7 @@ const EMPTY_FORM: FormState = {
   name: '',
   trello_board_id: '',
   trello_source_list_id: '',
+  trello_resolve_list_id: '',
   drive_folder_id: '',
   enabled: true,
 };
@@ -78,8 +80,13 @@ export default function SettingsPage() {
   }, [loadChannels, loadBoards]);
 
   function onBoardChange(boardId: string) {
-    // Changing board clears the previously selected source list.
-    setForm((f) => ({ ...f, trello_board_id: boardId, trello_source_list_id: '' }));
+    // Changing board clears the previously selected lists.
+    setForm((f) => ({
+      ...f,
+      trello_board_id: boardId,
+      trello_source_list_id: '',
+      trello_resolve_list_id: '',
+    }));
     loadLists(boardId);
   }
 
@@ -89,6 +96,7 @@ export default function SettingsPage() {
       name: ch.name,
       trello_board_id: ch.trello_board_id,
       trello_source_list_id: ch.trello_source_list_id,
+      trello_resolve_list_id: ch.trello_resolve_list_id ?? '',
       drive_folder_id: ch.drive_folder_id ?? '',
       enabled: ch.enabled,
     });
@@ -112,6 +120,7 @@ export default function SettingsPage() {
         name: form.name,
         trello_board_id: form.trello_board_id,
         trello_source_list_id: form.trello_source_list_id,
+        trello_resolve_list_id: form.trello_resolve_list_id,
         drive_folder_id: form.drive_folder_id,
         enabled: form.enabled,
       };
@@ -150,6 +159,7 @@ export default function SettingsPage() {
     !!form.name.trim() &&
     !!form.trello_board_id &&
     !!form.trello_source_list_id &&
+    !!form.trello_resolve_list_id &&
     !!form.drive_folder_id.trim() &&
     !saving;
 
@@ -173,7 +183,7 @@ export default function SettingsPage() {
       )}
 
       {/* ── Form ── */}
-      <section className="mb-8 rounded-2xl border border-hair bg-card p-6 shadow-card">
+      <section className="mb-8 rounded-3xl border border-hair bg-card p-6 shadow-card">
         <h2 className="mb-1 text-sm font-semibold text-ink">
           {form.id ? 'Edit channel' : 'Add a channel'}
         </h2>
@@ -211,6 +221,24 @@ export default function SettingsPage() {
             <select
               value={form.trello_source_list_id}
               onChange={(e) => setForm({ ...form, trello_source_list_id: e.target.value })}
+              disabled={!form.trello_board_id || listsLoading}
+              className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              <option value="">
+                {!form.trello_board_id ? 'Select a board first…' : 'Select a list…'}
+              </option>
+              {lists.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Resolve list (cards move here when done)">
+            <select
+              value={form.trello_resolve_list_id}
+              onChange={(e) => setForm({ ...form, trello_resolve_list_id: e.target.value })}
               disabled={!form.trello_board_id || listsLoading}
               className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
             >
@@ -267,7 +295,7 @@ export default function SettingsPage() {
       </section>
 
       {/* ── Existing channels ── */}
-      <section className="rounded-2xl border border-hair bg-card shadow-card">
+      <section className="rounded-3xl border border-hair bg-card shadow-card">
         <div className="border-b border-hair px-6 py-4">
           <h2 className="text-sm font-semibold text-ink">Channels</h2>
         </div>
@@ -295,7 +323,9 @@ export default function SettingsPage() {
                     )}
                   </div>
                   <div className="mt-0.5 truncate font-mono text-[11px] text-ghost">
-                    source {ch.trello_source_list_id} · drive {ch.drive_folder_id || '(unset)'}
+                    source {ch.trello_source_list_id} · resolve{' '}
+                    {ch.trello_resolve_list_id || '(unset)'} · drive{' '}
+                    {ch.drive_folder_id || '(unset)'}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">

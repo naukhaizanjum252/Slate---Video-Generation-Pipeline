@@ -10,8 +10,9 @@ create table if not exists channels (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   trello_board_id text not null,
-  trello_source_list_id text not null,
-  drive_folder_id text not null,   -- mandatory: each channel uploads to its own folder
+  trello_source_list_id text not null,   -- watcher polls this list
+  trello_resolve_list_id text not null,  -- card moved here on done (+ Drive comment)
+  drive_folder_id text not null,         -- mandatory: each channel's own folder
   enabled boolean not null default true,
   created_at timestamptz default now()
 );
@@ -43,6 +44,11 @@ begin
     update channels set drive_folder_id = '' where drive_folder_id is null;
     alter table channels alter column drive_folder_id set not null;
   end if;
+  -- Add the resolve list (cards move here on done). Backfill existing rows to ''
+  -- so NOT NULL applies; set the real list in the dashboard.
+  alter table channels add column if not exists trello_resolve_list_id text;
+  update channels set trello_resolve_list_id = '' where trello_resolve_list_id is null;
+  alter table channels alter column trello_resolve_list_id set not null;
 end $$;
 
 create index if not exists channels_enabled_idx on channels(enabled);
@@ -66,6 +72,7 @@ alter table episodes add column if not exists channel_id uuid references channel
 alter table episodes add column if not exists channel_name text;
 alter table episodes add column if not exists stage text;
 alter table episodes add column if not exists progress jsonb;
+alter table episodes add column if not exists timeline jsonb;
 alter table episodes add column if not exists cancel_requested boolean not null default false;
 
 create index if not exists episodes_status_idx on episodes(status);

@@ -63,6 +63,7 @@ async function main() {
       id: 'test-channel',
       name: 'TEST',
       driveFolderId: process.env.SLATE_TEST_DRIVE_FOLDER_ID ?? '',
+      resolveListId: process.env.SLATE_TEST_RESOLVE_LIST_ID ?? '',
     },
   };
 
