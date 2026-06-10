@@ -24,9 +24,10 @@ import json
 import sys
 import traceback
 
-# Total wall-clock budget for the orchestrated step (seconds).
-# Episodes run ~15-25 min end-to-end; 35 min leaves headroom for a slow run.
-PIPELINE_TIMEOUT = 35 * 60  # 35 minutes
+# Fallback wall-clock budget for the orchestrated step (seconds). The real cap
+# is passed in via --timeout-min from the Node parent (which also runs a stall
+# watchdog); this default only applies if the arg is missing.
+DEFAULT_TIMEOUT = 60 * 60  # 60 minutes
 
 
 def log(msg: str) -> None:
@@ -57,6 +58,8 @@ def run(
     image_path: str,
     gradio_url: str,
     enable_build_video: bool,
+    timeout_seconds: int,
+    download_only: bool = False,
 ) -> dict:
     # Imported lazily so that an import error becomes a structured result
     # rather than a raw traceback the parent can't parse.
@@ -71,6 +74,22 @@ def run(
         headers={"x-gradio-user": "app"},
         verbose=False,
     )
+
+    # Reuse probe: only fetch the bundle for an already-generated episode. If
+    # nothing exists, /cb_download_all errors/returns nothing → we report failure
+    # and the Node parent falls back to a full run.
+    if download_only:
+        log("Reuse probe: /cb_download_all")
+        progress("Checking for existing output")
+        probe_result = client.predict(
+            episode_name=episode_name,
+            api_name="/cb_download_all",
+        )
+        probe_zip = _first(probe_result)
+        if not probe_zip:
+            raise RuntimeError("No existing bundle for this episode")
+        log(f"Existing bundle -> {probe_zip}")
+        return {"success": True, "zip_path": probe_zip, "episode_name": episode_name}
 
     # ── Step 1: enhance the reference image ──────────────────────────────
     log(f"Step 1/{total}: /cb_pipeline_enhance")
@@ -117,7 +136,7 @@ def run(
             progress("Generating script & assets", steps)
     # Block for completion / surface any server-side exception, honoring the
     # overall timeout budget.
-    job.result(timeout=PIPELINE_TIMEOUT)
+    job.result(timeout=timeout_seconds)
     if final is None:
         # Fall back to the job's final result if no intermediate yields were seen.
         final = job.outputs()[-1] if job.outputs() else None
@@ -188,7 +207,11 @@ def main() -> int:
     parser.add_argument("--image-path", required=True)
     parser.add_argument("--gradio-url", required=True)
     parser.add_argument("--enable-build-video", action="store_true")
+    parser.add_argument("--download-only", action="store_true")
+    parser.add_argument("--timeout-min", type=int, default=0)
     args = parser.parse_args()
+
+    timeout_seconds = args.timeout_min * 60 if args.timeout_min > 0 else DEFAULT_TIMEOUT
 
     try:
         result = run(
@@ -197,6 +220,8 @@ def main() -> int:
             args.image_path,
             args.gradio_url,
             args.enable_build_video,
+            timeout_seconds,
+            args.download_only,
         )
         emit(result)
         return 0

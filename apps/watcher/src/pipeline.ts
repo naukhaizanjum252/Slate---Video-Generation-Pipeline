@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import AdmZip from 'adm-zip';
 import * as tmp from 'tmp';
 import type { PipelineResult, ProgressStep, PhaseStatus, TimelinePhase } from '@slate/shared';
@@ -12,18 +12,17 @@ import type { Config } from './config';
 
 const log = createLogger('pipeline');
 
-// Sentinel error returned by the python runner when a stop was requested, so the
-// caller can mark the episode 'cancelled' rather than 'failed'.
-const CANCEL_SENTINEL = '__SLATE_CANCELLED__';
+/** Outcome of running pipeline.py — failures carry a kind + diagnostic details. */
+type PyRunResult =
+  | { success: true; zip_path: string; episode_name: string }
+  | { success: false; kind: 'cancel' | 'stall' | 'error'; error: string; details?: string };
+
 // How often to poll Supabase for a stop request while a pipeline runs.
 const CANCEL_POLL_MS = 10000;
+// How often the stall watchdog checks for lack of progress.
+const STALL_CHECK_MS = 30000;
 // Min gap between stage writes to Supabase (coalesces rapid progress updates).
 const STAGE_WRITE_MS = 3000;
-
-// Episodes take ~15–25 min end-to-end (Opus script, Gemini enhance, 69labs
-// images in ~4 rounds of 4 + voiceover, FFmpeg 1080p stitch). Give the python
-// child 35 min so a slow run is never killed prematurely.
-const PY_TIMEOUT_MS = 35 * 60 * 1000;
 
 export interface PipelineDeps {
   cfg: Config;
@@ -136,66 +135,24 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     }
   };
 
-  try {
-    // 1. Download the Trello reference image to a temp file.
-    setStage('Downloading reference');
-    const ext = guessImageExt(job.attachment);
-    imageTmp = tmp.fileSync({ prefix: 'slate-ref-', postfix: ext });
-    await trello.downloadAttachment(job.attachment, imageTmp.name);
+  // Unzip a bundle zip to a temp dir; caller assigns `unzipDir` for cleanup.
+  const unzipBundle = (zipPath: string): { dir: tmp.DirResult; root: string } => {
+    if (!fs.existsSync(zipPath)) throw new Error(`Zip path does not exist on disk: ${zipPath}`);
+    const dir = tmp.dirSync({ prefix: 'slate-bundle-', unsafeCleanup: true });
+    new AdmZip(zipPath).extractAllTo(dir.name, /* overwrite */ true);
+    log.info(`Unzipped bundle -> ${dir.name}`);
+    return { dir, root: collapseSingleRoot(dir.name) };
+  };
 
-    // 2. Spawn pipeline.py and parse its JSON result. onProgress relays the
-    //    live stage; the cancel poller kills the child if a stop is requested.
-    const result = await runPythonPipeline(
-      {
-        episodeName: job.episodeName,
-        brief: job.brief,
-        imagePath: imageTmp.name,
-        gradioUrl: cfg.gradio.baseUrl,
-        enableBuildVideo: cfg.enableBuildVideo,
-      },
-      cfg.pythonBin,
-      setStage,
-      () => store.isCancelRequested(job.cardId),
-    );
-
-    if (!result.success) {
-      if (result.error === CANCEL_SENTINEL) {
-        await store.markCancelled(job.cardId, timelineWith('active'));
-        log.info(`🛑 Cancelled "${job.cardTitle}" (${job.episodeName})`);
-        return;
-      }
-      throw new Error(`Pipeline failed: ${result.error}`);
-    }
-
-    // Honor a stop requested after generation finished but before upload.
-    if (await store.isCancelRequested(job.cardId)) {
-      await store.markCancelled(job.cardId, timelineWith('active'));
-      log.info(`🛑 Cancelled "${job.cardTitle}" before upload`);
-      return;
-    }
-
-    // 3. Unzip the bundle (gradio_client returns a local zip path).
-    setStage('Unpacking bundle');
-    if (!fs.existsSync(result.zip_path)) {
-      throw new Error(`Zip path does not exist on disk: ${result.zip_path}`);
-    }
-    unzipDir = tmp.dirSync({ prefix: 'slate-bundle-', unsafeCleanup: true });
-    new AdmZip(result.zip_path).extractAllTo(unzipDir.name, /* overwrite */ true);
-    log.info(`Unzipped bundle -> ${unzipDir.name}`);
-
-    // The zip may contain a single top-level folder; upload its contents.
-    const rootToUpload = collapseSingleRoot(unzipDir.name);
-
-    // 4. Upload to the channel's Google Drive folder (mandatory per channel).
+  // Upload to Drive, mark done, then move the card to the resolve list + comment
+  // (best-effort). Shared by the normal and reuse paths.
+  const uploadAndFinalize = async (rootDir: string): Promise<void> => {
     setStage('Uploading to Drive');
     const driveUrl = await drive.uploadEpisodeFolder(
       job.cardTitle,
-      rootToUpload,
+      rootDir,
       job.channel.driveFolderId,
     );
-
-    // 5. Mark done in Supabase, then move the card to the channel's resolve list
-    //    and post the Drive link as a comment (best-effort — never fail a done).
     await store.markDone(job.cardId, driveUrl, timelineAllDone());
     log.info(`✅ Completed "${job.cardTitle}" -> ${driveUrl}`);
     if (job.channel.resolveListId) {
@@ -208,6 +165,113 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     } else {
       log.warn(`[${job.channel.name}] No resolve list configured — card left in source list`);
     }
+  };
+
+  const handlePyFailure = async (
+    result: { kind: 'cancel' | 'stall' | 'error'; error: string; details?: string },
+    stageWhenCancelled = 'active' as PhaseStatus,
+  ): Promise<void> => {
+    if (result.kind === 'cancel') {
+      await store.markCancelled(job.cardId, timelineWith(stageWhenCancelled));
+      log.info(`🛑 Cancelled "${job.cardTitle}" (${job.episodeName})`);
+      return;
+    }
+    const headline =
+      result.kind === 'stall'
+        ? `Pipeline stalled — no progress for ${cfg.stallTimeoutMin}m` +
+          (result.error ? ` (last: ${result.error})` : '')
+        : `Pipeline failed: ${result.error}`;
+    const studioLog = await captureStudioLog(cfg.studioLogUnit).catch(() => '');
+    const parts = [headline];
+    if (result.details) parts.push(`── pipeline output ──\n${result.details}`);
+    if (studioLog) parts.push(`── studio log (${cfg.studioLogUnit}) ──\n${studioLog}`);
+    throw new Error(parts.join('\n\n'));
+  };
+
+  try {
+    // 0. Reuse: probe for an already-complete bundle and skip generation if found.
+    if (cfg.reuseExisting) {
+      setStage('Checking for existing output');
+      const probe = await runPythonPipeline(
+        {
+          episodeName: job.episodeName,
+          brief: job.brief,
+          imagePath: 'none',
+          gradioUrl: cfg.gradio.baseUrl,
+          enableBuildVideo: cfg.enableBuildVideo,
+          timeoutMin: cfg.probeTimeoutMin,
+          downloadOnly: true,
+        },
+        cfg.pythonBin,
+        cfg.probeTimeoutMin * 60_000,
+        cfg.probeTimeoutMin * 60_000,
+        setStage,
+        () => store.isCancelRequested(job.cardId),
+      );
+      if (probe.success && fs.existsSync(probe.zip_path)) {
+        const { dir, root } = unzipBundle(probe.zip_path);
+        unzipDir = dir;
+        if (isCompleteBundle(root, cfg.enableBuildVideo)) {
+          log.info(`♻️  Reusing existing output for "${job.cardTitle}" — skipping generation`);
+          await uploadAndFinalize(root);
+          return;
+        }
+        log.info(`Existing output incomplete — regenerating "${job.cardTitle}"`);
+        try {
+          dir.removeCallback();
+        } catch {
+          /* ignore */
+        }
+        unzipDir = null;
+      } else if (!probe.success && probe.kind === 'cancel') {
+        await store.markCancelled(job.cardId, timelineWith('active'));
+        log.info(`🛑 Cancelled "${job.cardTitle}" during reuse probe`);
+        return;
+      }
+      // Otherwise no reusable bundle (expected for fresh episodes) — generate.
+    }
+
+    // 1. Download the Trello reference image to a temp file.
+    setStage('Downloading reference');
+    const ext = guessImageExt(job.attachment);
+    imageTmp = tmp.fileSync({ prefix: 'slate-ref-', postfix: ext });
+    await trello.downloadAttachment(job.attachment, imageTmp.name);
+
+    // 2. Spawn pipeline.py for the full generation run.
+    const result = await runPythonPipeline(
+      {
+        episodeName: job.episodeName,
+        brief: job.brief,
+        imagePath: imageTmp.name,
+        gradioUrl: cfg.gradio.baseUrl,
+        enableBuildVideo: cfg.enableBuildVideo,
+        timeoutMin: cfg.pipelineTimeoutMin,
+        downloadOnly: false,
+      },
+      cfg.pythonBin,
+      cfg.pipelineTimeoutMin * 60_000,
+      cfg.stallTimeoutMin * 60_000,
+      setStage,
+      () => store.isCancelRequested(job.cardId),
+    );
+
+    if (!result.success) {
+      await handlePyFailure(result);
+      return;
+    }
+
+    // Honor a stop requested after generation finished but before upload.
+    if (await store.isCancelRequested(job.cardId)) {
+      await store.markCancelled(job.cardId, timelineWith('active'));
+      log.info(`🛑 Cancelled "${job.cardTitle}" before upload`);
+      return;
+    }
+
+    // 3. Unzip the bundle, then 4. upload + finalize.
+    setStage('Unpacking bundle');
+    const { dir, root } = unzipBundle(result.zip_path);
+    unzipDir = dir;
+    await uploadAndFinalize(root);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error(`❌ Pipeline error for "${job.cardTitle}": ${message}`, err);
@@ -242,20 +306,27 @@ interface PyArgs {
   imagePath: string;
   gradioUrl: string;
   enableBuildVideo: boolean;
+  timeoutMin: number;
+  downloadOnly: boolean;
 }
 
 /**
  * Spawn pipeline.py and resolve with the parsed PipelineResult. Rejects only
  * on spawn-level failures or unparseable output; pipeline logic failures come
- * back as { success: false } which the caller handles. `onProgress` receives
- * each "PROGRESS <stage>" line pipeline.py emits.
+ * back as { success: false } which the caller handles.
+ *
+ * Two safety nets: a HARD timeout (`pipelineTimeoutMs`) caps the whole run, and
+ * a STALL watchdog fails fast if no PROGRESS update arrives for `stallTimeoutMs`
+ * (so a wedged image/voiceover step surfaces clearly instead of hanging).
  */
 function runPythonPipeline(
   args: PyArgs,
   pythonBin: string,
+  pipelineTimeoutMs: number,
+  stallTimeoutMs: number,
   onProgress?: (phase: string, steps: ProgressStep[]) => void,
   isCancelRequested?: () => Promise<boolean>,
-): Promise<PipelineResult> {
+): Promise<PyRunResult> {
   const scriptPath = resolvePipelineScript();
 
   const argv = [
@@ -268,20 +339,30 @@ function runPythonPipeline(
     args.imagePath,
     '--gradio-url',
     args.gradioUrl,
+    '--timeout-min',
+    String(args.timeoutMin),
   ];
   if (args.enableBuildVideo) argv.push('--enable-build-video');
+  if (args.downloadOnly) argv.push('--download-only');
 
-  return new Promise<PipelineResult>((resolve, reject) => {
+  return new Promise<PyRunResult>((resolve) => {
     const child = spawn(pythonBin, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
     let settled = false;
     let cancelTimer: ReturnType<typeof setInterval> | undefined;
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
+    // Liveness for stall detection: bumped on every PROGRESS line.
+    let lastProgressAt = Date.now();
+    let lastProgressLabel = '';
+
+    const tail = () => stderr.trim().split('\n').slice(-40).join('\n').slice(-1800);
 
     const cleanup = () => {
       clearTimeout(timer);
       if (cancelTimer) clearInterval(cancelTimer);
+      if (stallTimer) clearInterval(stallTimer);
     };
 
     const timer = setTimeout(() => {
@@ -289,11 +370,27 @@ function runPythonPipeline(
       settled = true;
       cleanup();
       child.kill('SIGKILL');
-      reject(new Error(`pipeline.py timed out after ${PY_TIMEOUT_MS / 1000}s`));
-    }, PY_TIMEOUT_MS);
+      resolve({
+        success: false,
+        kind: 'error',
+        error: `Hard timeout after ${Math.round(pipelineTimeoutMs / 60000)}m`,
+        details: tail(),
+      });
+    }, pipelineTimeoutMs);
 
-    // Poll for a dashboard stop request; if seen, kill the child and resolve
-    // with the cancel sentinel so the caller marks the episode 'cancelled'.
+    // Stall watchdog: if no PROGRESS arrives for stallTimeoutMs, the studio/69labs
+    // step is wedged — kill and report a stall (distinct from the hard timeout).
+    stallTimer = setInterval(() => {
+      if (settled) return;
+      if (Date.now() - lastProgressAt > stallTimeoutMs) {
+        settled = true;
+        cleanup();
+        child.kill('SIGKILL');
+        resolve({ success: false, kind: 'stall', error: lastProgressLabel, details: tail() });
+      }
+    }, STALL_CHECK_MS);
+
+    // Poll for a dashboard stop request; if seen, kill the child and resolve cancelled.
     if (isCancelRequested) {
       cancelTimer = setInterval(() => {
         if (settled) return;
@@ -303,7 +400,7 @@ function runPythonPipeline(
             settled = true;
             cleanup();
             child.kill('SIGKILL');
-            resolve({ success: false, error: CANCEL_SENTINEL });
+            resolve({ success: false, kind: 'cancel', error: '' });
           })
           .catch(() => {
             /* ignore transient poll errors */
@@ -321,11 +418,15 @@ function runPythonPipeline(
         if (!trimmed) continue;
         log.info(`[py] ${trimmed}`);
         const m = trimmed.match(/PROGRESS (\{.*\})\s*$/);
-        if (m && onProgress) {
+        if (m) {
+          // Any new PROGRESS line means the pipeline is alive — reset the stall timer.
+          lastProgressAt = Date.now();
           try {
             const parsed = JSON.parse(m[1]) as { phase?: string; steps?: ProgressStep[] };
             if (parsed && typeof parsed.phase === 'string') {
-              onProgress(parsed.phase, Array.isArray(parsed.steps) ? parsed.steps : []);
+              const active = (parsed.steps ?? []).map((s) => s.label).join(', ');
+              lastProgressLabel = active ? `${parsed.phase} (${active})` : parsed.phase;
+              if (onProgress) onProgress(parsed.phase, Array.isArray(parsed.steps) ? parsed.steps : []);
             }
           } catch {
             /* ignore malformed progress lines */
@@ -338,7 +439,7 @@ function runPythonPipeline(
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error(`Failed to spawn ${pythonBin}: ${err.message}`));
+      resolve({ success: false, kind: 'error', error: `Failed to spawn ${pythonBin}: ${err.message}` });
     });
 
     child.on('close', (code) => {
@@ -347,26 +448,50 @@ function runPythonPipeline(
       cleanup();
       const trimmed = stdout.trim();
       if (!trimmed) {
-        reject(
-          new Error(
-            `pipeline.py produced no stdout (exit ${code}). stderr: ${stderr.slice(-2000)}`,
-          ),
-        );
+        resolve({
+          success: false,
+          kind: 'error',
+          error: `pipeline.py exited (code ${code}) with no result`,
+          details: tail(),
+        });
         return;
       }
-      // The contract is a single JSON line; take the last JSON-looking line
-      // to be robust against any stray prints.
+      // The contract is a single JSON line; take the last JSON-looking line.
       const jsonLine = lastJsonLine(trimmed);
       if (!jsonLine) {
-        reject(new Error(`Could not find JSON in pipeline.py stdout: ${trimmed.slice(-2000)}`));
+        resolve({ success: false, kind: 'error', error: 'No JSON result from pipeline.py', details: tail() });
         return;
       }
       try {
-        resolve(JSON.parse(jsonLine) as PipelineResult);
-      } catch (e) {
-        reject(new Error(`Invalid JSON from pipeline.py: ${jsonLine}`));
+        const parsed = JSON.parse(jsonLine) as PipelineResult;
+        if (parsed.success) {
+          resolve({ success: true, zip_path: parsed.zip_path, episode_name: parsed.episode_name });
+        } else {
+          resolve({ success: false, kind: 'error', error: parsed.error, details: tail() });
+        }
+      } catch {
+        resolve({ success: false, kind: 'error', error: `Invalid JSON: ${jsonLine}`, details: tail() });
       }
     });
+  });
+}
+
+/**
+ * Best-effort capture of the studio's recent journal (the real cause of a stall
+ * usually lives there, not in pipeline.py's output). Returns '' if unavailable.
+ */
+function captureStudioLog(unit: string): Promise<string> {
+  if (!unit) return Promise.resolve('');
+  return new Promise((resolve) => {
+    execFile(
+      'journalctl',
+      ['-u', unit, '--no-pager', '-n', '200'],
+      { timeout: 8000, maxBuffer: 4_000_000 },
+      (err, stdout) => {
+        if (err || !stdout) return resolve('');
+        resolve(stdout.trim().split('\n').slice(-40).join('\n').slice(-2000));
+      },
+    );
   });
 }
 
@@ -398,6 +523,38 @@ function guessImageExt(att: TrelloAttachment): string {
   if ((att.mimeType ?? '').includes('png')) return '.png';
   if ((att.mimeType ?? '').includes('jpeg')) return '.jpg';
   return '.png';
+}
+
+/**
+ * Validate that an extracted bundle is a COMPLETE episode (so we only reuse real,
+ * finished output — never a partial one from a stalled run). Requires the final
+ * images, audio, and the episode package; the MP4 too when video build is on.
+ */
+function isCompleteBundle(rootDir: string, requireVideo: boolean): boolean {
+  const files: string[] = [];
+  const walk = (d: string) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.isFile()) files.push(e.name.toLowerCase());
+    }
+  };
+  try {
+    walk(rootDir);
+  } catch {
+    return false;
+  }
+  const images = files.filter((f) => /\.(png|jpe?g|webp)$/.test(f)).length;
+  const hasAudio = files.some((f) => /\.(mp3|wav)$/.test(f));
+  const hasPackage = files.includes('episode_package.json');
+  const hasVideo = files.some((f) => /\.(mp4|mov|webm)$/.test(f));
+  const ok = images >= 15 && hasAudio && hasPackage && (!requireVideo || hasVideo);
+  if (!ok) {
+    log.info(
+      `Bundle check: images=${images} audio=${hasAudio} package=${hasPackage} video=${hasVideo}`,
+    );
+  }
+  return ok;
 }
 
 /**

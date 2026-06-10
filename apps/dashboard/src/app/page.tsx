@@ -72,6 +72,28 @@ export default function Page() {
     [load],
   );
 
+  const removeEpisode = useCallback(
+    async (ep: Episode, mode: 'delete' | 'retry') => {
+      const msg =
+        mode === 'retry'
+          ? `Retry "${ep.card_title}"? Its current record is cleared and the card is reprocessed (it must still be in the source list).`
+          : `Delete the record for "${ep.card_title}"?`;
+      if (typeof window !== 'undefined' && !window.confirm(msg)) return;
+      try {
+        const res = await fetch(`/api/episodes/${ep.id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          throw new Error(d.error ?? 'Failed');
+        }
+        // Optimistically drop it; the watcher re-adds a fresh row on retry.
+        setEpisodes((list) => list.filter((e) => e.id !== ep.id));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed');
+      }
+    },
+    [],
+  );
+
   const counts = useMemo(
     () => ({
       total: episodes.length,
@@ -196,7 +218,13 @@ export default function Page() {
                   />
                 ) : (
                   visible.map((ep) => (
-                    <Row key={ep.id} ep={ep} onStop={stop} stopping={stopping.has(ep.id)} />
+                    <Row
+                      key={ep.id}
+                      ep={ep}
+                      onStop={stop}
+                      stopping={stopping.has(ep.id)}
+                      onRemove={removeEpisode}
+                    />
                   ))
                 )}
               </tbody>
@@ -352,10 +380,12 @@ function Row({
   ep,
   onStop,
   stopping,
+  onRemove,
 }: {
   ep: Episode;
   onStop: (ep: Episode) => void;
   stopping: boolean;
+  onRemove: (ep: Episode, mode: 'delete' | 'retry') => void;
 }) {
   const [showError, setShowError] = useState(false);
   const [open, setOpen] = useState(false);
@@ -447,7 +477,24 @@ function Row({
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         ) : (
-          <span className="text-ghost">—</span>
+          <div className="inline-flex items-center justify-end gap-2">
+            {(ep.status === 'failed' || ep.status === 'cancelled') && (
+              <button
+                onClick={() => onRemove(ep, 'retry')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-soft px-2.5 py-1 text-xs font-medium text-brand-dim transition-colors hover:bg-brand/10"
+              >
+                <IconRetry />
+                Retry
+              </button>
+            )}
+            <button
+              onClick={() => onRemove(ep, 'delete')}
+              title="Delete record"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-hair bg-card px-2 py-1 text-xs font-medium text-muted transition-colors hover:border-rose-200 hover:text-rose-600"
+            >
+              <IconTrash />
+            </button>
+          </div>
         )}
       </td>
     </tr>
@@ -945,6 +992,20 @@ function IconStop() {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden>
       <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+    </svg>
+  );
+}
+function IconRetry() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M20 11a8 8 0 1 0-.6 4M20 5v6h-6" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function IconTrash() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7m4 4v6m6-6v6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
