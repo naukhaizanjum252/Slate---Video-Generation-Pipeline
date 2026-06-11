@@ -575,115 +575,33 @@ function Row({
   );
 }
 
-/** Ordered pipeline phases (build-video omitted — off by default). */
-const PHASES: { key: string; label: string }[] = [
-  { key: 'Downloading reference', label: 'Reference image' },
-  { key: 'Enhancing reference', label: 'Enhance reference' },
-  { key: 'Generating script & assets', label: 'Script & assets' },
-  { key: 'Packaging files', label: 'Package files' },
-  { key: 'Unpacking bundle', label: 'Unpack bundle' },
-  { key: 'Uploading to Drive', label: 'Upload to Drive' },
-];
-
-type PhaseState = 'done' | 'active' | 'pending';
-
 /**
- * Live status as a phase checklist: completed phases get a green check, the
- * current one is highlighted (with its sub-task bars), upcoming ones are dimmed.
- * Always shows the whole pipeline so earlier steps stay visible.
+ * Compact live status for a processing row: the current phase + its parallel
+ * sub-task bars (Script / Images / Voiceover). The full phase timeline lives in
+ * the expandable stepper (chevron), so this stays small and never widens the row.
  */
 function StageProgress({ stage, steps }: { stage: string | null; steps: ProgressStep[] }) {
-  const idx = stage ? PHASES.findIndex((p) => p.key === stage) : -1;
-
-  // Unknown/early phase (e.g. "Queued") — simple current-line fallback.
-  if (idx === -1) {
-    return (
-      <div className="mt-2 w-[300px] max-w-full space-y-2">
-        {stage && (
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
-            <span className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-brand" />
-            <span className="truncate" title={stage}>
-              {stage}
-            </span>
-          </div>
-        )}
-        {steps.length > 0 ? (
-          <div className="space-y-2.5">
-            {steps.map((s) => (
-              <StepRow key={s.label} step={s} />
-            ))}
-          </div>
-        ) : (
-          <IndeterminateBar />
-        )}
-      </div>
-    );
-  }
-
   return (
-    <ol className="mt-2.5 w-[300px] max-w-full space-y-2.5">
-      {PHASES.map((p, i) => {
-        const state: PhaseState = i < idx ? 'done' : i === idx ? 'active' : 'pending';
-        return (
-          <li key={p.key}>
-            <div className="flex items-center gap-2">
-              <PhaseIcon state={state} />
-              <span
-                className={`text-[12px] ${
-                  state === 'active'
-                    ? 'font-semibold text-ink'
-                    : state === 'done'
-                      ? 'text-muted'
-                      : 'text-ghost'
-                }`}
-              >
-                {p.label}
-              </span>
-            </div>
-            {state === 'active' && (
-              <div className="ml-[26px] mt-2">
-                {steps.length > 0 ? (
-                  <div className="space-y-2.5">
-                    {steps.map((s) => (
-                      <StepRow key={s.label} step={s} />
-                    ))}
-                  </div>
-                ) : (
-                  <IndeterminateBar />
-                )}
-              </div>
-            )}
-          </li>
-        );
-      })}
-    </ol>
+    <div className="mt-2 w-[224px] max-w-full space-y-2">
+      {stage && (
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
+          <span className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-brand" />
+          <span className="truncate" title={stage}>
+            {stage}
+          </span>
+        </div>
+      )}
+      {steps.length > 0 ? (
+        <div className="space-y-2">
+          {steps.map((s) => (
+            <StepRow key={s.label} step={s} />
+          ))}
+        </div>
+      ) : (
+        <IndeterminateBar />
+      )}
+    </div>
   );
-}
-
-function PhaseIcon({ state }: { state: PhaseState }) {
-  if (state === 'done') {
-    return (
-      <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-emerald-500 text-white">
-        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden>
-          <path
-            d="m5 12.5 4.5 4.5L19 7"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </span>
-    );
-  }
-  if (state === 'active') {
-    return (
-      <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full border-2 border-brand">
-        <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-brand" />
-      </span>
-    );
-  }
-  return <span className="h-4 w-4 shrink-0 rounded-full border-2 border-hair" />;
 }
 
 /* ─────────────────────────── Episode stepper (expanded) ─────────────────────────── */
