@@ -79,12 +79,33 @@ create index if not exists episodes_status_idx on episodes(status);
 create index if not exists episodes_created_at_idx on episodes(created_at desc);
 create index if not exists episodes_channel_idx on episodes(channel_id);
 
+-- ─── Drive auth ─────────────────────────────────────────────────────────────
+-- Holds the SINGLE connected Google account used for all Drive uploads. Set from
+-- the dashboard's "Connect Google Drive" button (server-side, service-role) and
+-- read by the watcher at upload time, so switching accounts needs no redeploy.
+--
+-- SECURITY: this table is NEVER exposed to the browser. It has RLS enabled with
+-- NO anon policy, so only the service-role key (watcher + dashboard server) can
+-- read or write it. The refresh_token must never reach the client.
+--
+-- Single-row pattern: the boolean primary key is forced to `true` by a check
+-- constraint, so upserts on id=true always target the one row.
+create table if not exists drive_auth (
+  id boolean primary key default true,
+  refresh_token text not null,
+  account_email text,
+  updated_at timestamptz default now(),
+  constraint drive_auth_singleton check (id = true)
+);
+
 -- ─── Row Level Security ─────────────────────────────────────────────────────
--- The dashboard's anon key may READ both tables. All WRITES go through the
--- dashboard's server-side API routes / the watcher, both using the service-role
--- key, which bypasses RLS.
+-- The dashboard's anon key may READ episodes + channels only. drive_auth has RLS
+-- on with NO policy → service-role only. All WRITES go through the dashboard's
+-- server-side API routes / the watcher, both using the service-role key, which
+-- bypasses RLS.
 alter table episodes enable row level security;
 alter table channels enable row level security;
+alter table drive_auth enable row level security;
 
 drop policy if exists "anon can read episodes" on episodes;
 create policy "anon can read episodes"

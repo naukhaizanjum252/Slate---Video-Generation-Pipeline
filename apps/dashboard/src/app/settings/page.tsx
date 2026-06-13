@@ -1,7 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { Channel, TrelloBoardOption, TrelloListOption } from '@slate/shared';
+import type {
+  Channel,
+  DriveAuthStatus,
+  DriveFolderOption,
+  TrelloBoardOption,
+  TrelloListOption,
+} from '@slate/shared';
 import { Shell, PageHeader } from '@/components/Shell';
 
 interface FormState {
@@ -28,6 +34,9 @@ export default function SettingsPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [boards, setBoards] = useState<TrelloBoardOption[]>([]);
   const [lists, setLists] = useState<TrelloListOption[]>([]);
+  const [driveStatus, setDriveStatus] = useState<DriveAuthStatus | null>(null);
+  const [folders, setFolders] = useState<DriveFolderOption[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [listsLoading, setListsLoading] = useState(false);
@@ -67,17 +76,61 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const loadDriveStatus = useCallback(async (): Promise<DriveAuthStatus> => {
+    const res = await fetch('/api/drive/status');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Failed to load Drive status');
+    setDriveStatus(data as DriveAuthStatus);
+    return data as DriveAuthStatus;
+  }, []);
+
+  const loadFolders = useCallback(async () => {
+    setFoldersLoading(true);
+    try {
+      const res = await fetch('/api/drive/folders');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to load Drive folders');
+      setFolders(data as DriveFolderOption[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load Drive folders');
+    } finally {
+      setFoldersLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
-        await Promise.all([loadChannels(), loadBoards()]);
+        const [, , status] = await Promise.all([
+          loadChannels(),
+          loadBoards(),
+          loadDriveStatus(),
+        ]);
+        if (status.connected) void loadFolders();
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load');
       } finally {
         setLoading(false);
       }
     })();
-  }, [loadChannels, loadBoards]);
+  }, [loadChannels, loadBoards, loadDriveStatus, loadFolders]);
+
+  // Surface the result of the Google connect redirect (?drive=connected /
+  // ?drive_error=…) once, then clean the URL.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const p = new URLSearchParams(window.location.search);
+    const connected = p.get('drive') === 'connected';
+    const driveError = p.get('drive_error');
+    if (connected) {
+      setNotice('Google Drive connected.');
+      void loadDriveStatus().then((s) => {
+        if (s.connected) void loadFolders();
+      });
+    }
+    if (driveError) setError(driveError);
+    if (connected || driveError) window.history.replaceState({}, '', '/settings');
+  }, [loadDriveStatus, loadFolders]);
 
   function onBoardChange(boardId: string) {
     // Changing board clears the previously selected lists.
@@ -182,6 +235,9 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* ── Google Drive connection ── */}
+      <GoogleDriveCard status={driveStatus} loading={loading} />
+
       {/* ── Form ── */}
       <section className="mb-8 rounded-3xl border border-hair bg-card p-6 shadow-card">
         <h2 className="mb-1 text-sm font-semibold text-ink">
@@ -253,13 +309,35 @@ export default function SettingsPage() {
             </select>
           </Field>
 
-          <Field label="Google Drive folder ID">
-            <input
-              value={form.drive_folder_id}
-              onChange={(e) => setForm({ ...form, drive_folder_id: e.target.value })}
-              placeholder="Required — must be shared with the service account"
-              className={inputCls}
-            />
+          <Field label="Google Drive folder">
+            {!driveStatus?.connected ? (
+              <p className="pt-2 text-[12px] text-muted">
+                Connect a Google account above to choose a folder.
+              </p>
+            ) : (
+              <select
+                value={form.drive_folder_id}
+                onChange={(e) => setForm({ ...form, drive_folder_id: e.target.value })}
+                disabled={foldersLoading}
+                className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                <option value="">{foldersLoading ? 'Loading folders…' : 'Select a folder…'}</option>
+                {/* Preserve a previously-saved folder even if it isn't in the
+                    current account's list (e.g. editing a channel set on another
+                    account), so editing doesn't silently drop it. */}
+                {form.drive_folder_id &&
+                  !folders.some((f) => f.id === form.drive_folder_id) && (
+                    <option value={form.drive_folder_id}>
+                      Current folder ({form.drive_folder_id})
+                    </option>
+                  )}
+                {folders.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </Field>
 
           <Field label="Enabled">
@@ -349,6 +427,55 @@ export default function SettingsPage() {
       </section>
       </main>
     </Shell>
+  );
+}
+
+/**
+ * Google Drive connection panel. Uploads run as the connected account; the
+ * Connect button is a full-page navigation to /api/drive/connect (which
+ * redirects to Google's consent screen). Reconnecting switches the account for
+ * every channel at once.
+ */
+function GoogleDriveCard({ status, loading }: { status: DriveAuthStatus | null; loading: boolean }) {
+  const connected = status?.connected ?? false;
+  return (
+    <section className="mb-8 rounded-3xl border border-hair bg-card p-6 shadow-card">
+      <h2 className="mb-1 text-sm font-semibold text-ink">Google Drive</h2>
+      <p className="mb-4 text-[12px] text-muted">
+        Episodes upload to this account. All channels share it — reconnecting
+        switches the account everywhere.
+      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              connected ? 'bg-emerald-500' : status === null && !loading ? 'bg-amber-400' : 'bg-ghost'
+            }`}
+          />
+          {loading ? (
+            <span className="text-muted">Checking…</span>
+          ) : status === null ? (
+            // The status check itself failed — don't claim "not connected".
+            <span className="text-muted">Couldn’t check connection (is the server running / env set?)</span>
+          ) : connected ? (
+            <span className="text-ink">
+              Connected
+              {status.account_email && (
+                <span className="text-muted"> · {status.account_email}</span>
+              )}
+            </span>
+          ) : (
+            <span className="text-muted">Not connected</span>
+          )}
+        </div>
+        <a
+          href="/api/drive/connect"
+          className="inline-flex items-center rounded-lg border border-hair bg-card px-4 py-2 text-sm font-medium text-ink transition-colors hover:border-brand/40 hover:text-brand"
+        >
+          {connected ? 'Reconnect / switch account' : 'Connect Google Drive'}
+        </a>
+      </div>
+    </section>
   );
 }
 

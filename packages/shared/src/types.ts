@@ -65,6 +65,21 @@ export interface Channel {
 /** Fields accepted when creating/updating a channel (no server-managed keys). */
 export type ChannelInput = Omit<Channel, 'id' | 'created_at'>;
 
+/**
+ * Connection state of the single Google account used for Drive uploads, as
+ * surfaced to the dashboard. The refresh token itself NEVER leaves the server.
+ */
+export interface DriveAuthStatus {
+  connected: boolean;
+  account_email: string | null;
+}
+
+/** A Google Drive folder, as surfaced to the dashboard folder dropdown. */
+export interface DriveFolderOption {
+  id: string;
+  name: string;
+}
+
 /** A Trello board, as surfaced to the dashboard dropdowns. */
 export interface TrelloBoardOption {
   id: string;

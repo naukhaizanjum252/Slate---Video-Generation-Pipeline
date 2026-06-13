@@ -14,6 +14,25 @@ export class EpisodeStore {
     });
   }
 
+  /**
+   * Fetch the connected Google account's Drive refresh token (set from the
+   * dashboard). Returns null when no account has been connected there yet, so
+   * the caller can fall back to the env value. Never throws — a transient
+   * lookup failure shouldn't block falling back.
+   */
+  async getDriveRefreshToken(): Promise<string | null> {
+    const { data, error } = await this.client
+      .from('drive_auth')
+      .select('refresh_token')
+      .eq('id', true)
+      .maybeSingle();
+    if (error) {
+      log.warn(`Drive auth lookup failed (falling back to env): ${error.message}`);
+      return null;
+    }
+    return data?.refresh_token ?? null;
+  }
+
   /** Fetch all enabled channels to poll. */
   async getEnabledChannels(): Promise<Channel[]> {
     const { data, error } = await this.client

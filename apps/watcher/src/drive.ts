@@ -1,10 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { google, drive_v3 } from 'googleapis';
+import { google, drive_v3, type Auth } from 'googleapis';
 import { createLogger } from './logger';
 import type { Config } from './config';
 
 const log = createLogger('drive');
+
+/**
+ * Resolves the current Drive refresh token at upload time. Lets the connected
+ * account be switched from the dashboard (stored in Supabase) without a restart.
+ */
+export type RefreshTokenProvider = () => Promise<string>;
 
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -29,14 +35,37 @@ function mimeForFile(filePath: string): string {
 }
 
 export class DriveUploader {
+  private readonly oauth2: Auth.OAuth2Client;
   private readonly drive: drive_v3.Drive;
+  private currentToken = '';
 
-  constructor(cfg: Config['google']) {
+  constructor(
+    cfg: Config['google'],
+    private readonly getRefreshToken: RefreshTokenProvider,
+  ) {
     // OAuth as the real Drive owner. googleapis auto-refreshes the access token
-    // from the refresh token, so this works unattended on the server.
-    const oauth2 = new google.auth.OAuth2(cfg.oauthClientId, cfg.oauthClientSecret);
-    oauth2.setCredentials({ refresh_token: cfg.oauthRefreshToken });
-    this.drive = google.drive({ version: 'v3', auth: oauth2 });
+    // from the refresh token, so this works unattended on the server. The
+    // refresh token is resolved per upload (see ensureAuth) so the dashboard can
+    // switch accounts without a redeploy.
+    this.oauth2 = new google.auth.OAuth2(cfg.oauthClientId, cfg.oauthClientSecret);
+    this.drive = google.drive({ version: 'v3', auth: this.oauth2 });
+  }
+
+  /** Resolve the current refresh token and apply it to the OAuth client. */
+  private async ensureAuth(): Promise<void> {
+    const token = (await this.getRefreshToken()).trim();
+    if (!token) {
+      throw new Error(
+        'No Google Drive account connected. Connect one in the dashboard Settings ' +
+          '(or set GOOGLE_OAUTH_REFRESH_TOKEN in the watcher env).',
+      );
+    }
+    // Only reset credentials when the token actually changed, so we don't throw
+    // away a cached access token on every upload.
+    if (token !== this.currentToken) {
+      this.oauth2.setCredentials({ refresh_token: token });
+      this.currentToken = token;
+    }
   }
 
   /** Create a folder under the given parent and return its id. */
@@ -101,9 +130,10 @@ export class DriveUploader {
     const parent = (parentFolderId ?? '').trim();
     if (!parent) {
       throw new Error(
-        'No Drive folder configured for this channel. Set a Drive folder ID in the dashboard Settings.',
+        'No Drive folder configured for this channel. Pick a Drive folder in the dashboard Settings.',
       );
     }
+    await this.ensureAuth();
     const folderId = await this.createFolder(cardTitle, parent);
     log.info(`Created Drive folder "${cardTitle}" (${folderId}) under parent ${parent}`);
     await this.uploadDirContents(unzippedDir, folderId);

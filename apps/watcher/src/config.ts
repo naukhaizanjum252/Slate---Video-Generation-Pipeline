@@ -94,7 +94,10 @@ export function loadConfig(): Config {
     google: {
       oauthClientId: required('GOOGLE_OAUTH_CLIENT_ID'),
       oauthClientSecret: required('GOOGLE_OAUTH_CLIENT_SECRET'),
-      oauthRefreshToken: required('GOOGLE_OAUTH_REFRESH_TOKEN'),
+      // Optional now: the connected account is normally set from the dashboard
+      // (stored in Supabase). This env value is a fallback used only when no
+      // account has been connected there yet.
+      oauthRefreshToken: optional('GOOGLE_OAUTH_REFRESH_TOKEN', ''),
     },
     pythonBin: optional('PYTHON_BIN', 'python3'),
     pollCron: optional('POLL_CRON', '*/60 * * * * *'),

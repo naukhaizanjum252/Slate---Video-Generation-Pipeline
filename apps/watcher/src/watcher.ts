@@ -194,11 +194,19 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
 
 /** Build all external clients from validated config. */
 export function buildDeps(cfg: Config): PipelineDeps {
+  const store = new EpisodeStore(cfg.supabase);
+  // Drive token: prefer the account connected from the dashboard (Supabase),
+  // fall back to the env value. Resolved per upload so account switches in the
+  // dashboard take effect without restarting the watcher.
+  const getRefreshToken = async (): Promise<string> => {
+    const fromDb = await store.getDriveRefreshToken();
+    return fromDb || cfg.google.oauthRefreshToken || '';
+  };
   return {
     cfg,
     trello: new TrelloClient(cfg.trello),
-    drive: new DriveUploader(cfg.google),
-    store: new EpisodeStore(cfg.supabase),
+    drive: new DriveUploader(cfg.google, getRefreshToken),
+    store,
   };
 }
 

@@ -71,12 +71,17 @@ ID + secret, and a refresh token; plus a Drive folder ID per channel.
    warning: **Advanced → Go to … (unsafe)**). It prints
    `GOOGLE_OAUTH_REFRESH_TOKEN=…` — copy that value.
 6. In **Google Drive**, create a folder for each channel's episodes. (No sharing
-   needed — uploads run as you, so you already own them.) Copy each folder's ID
-   from its URL: `https://drive.google.com/drive/folders/`**`THIS_LONG_ID`** —
-   you'll paste it into the channel's **Drive folder ID** field (Part J).
+   needed — uploads run as you, so you already own them.) You'll pick these from a
+   dropdown in the dashboard (Part J) — no need to copy folder IDs by hand.
 
-> ✅ You now have: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
-> `GOOGLE_OAUTH_REFRESH_TOKEN`, and a Drive folder ID per channel.
+> **Recommended path:** instead of the CLI refresh-token script, connect the Drive
+> account from the **dashboard** (Part J) — click "Connect Google Drive" and pick
+> the account. That requires a **Web** OAuth client (Part F) and stores the token
+> in Supabase. The Desktop client + `get-drive-token` + `GOOGLE_OAUTH_REFRESH_TOKEN`
+> below remain as an optional fallback for the watcher.
+
+> ✅ You now have: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and
+> (optionally) `GOOGLE_OAUTH_REFRESH_TOKEN`, plus a Drive folder per channel.
 
 ---
 
@@ -166,15 +171,23 @@ Edit it:
 NEXT_PUBLIC_SUPABASE_URL=https://xxxxxxxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGci...   # the anon public key
 
-# Server-only — power the Settings page (channel CRUD + Trello dropdowns)
+# Server-only — power the Settings page (channel CRUD + Trello + Drive connect)
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGci...        # service_role secret (same as watcher)
 TRELLO_API_KEY=abc123...
 TRELLO_TOKEN=ATTAxxxxxxxx...
+
+# Google OAuth — Web application client (NOT the Desktop one). Powers the
+# "Connect Google Drive" button + folder dropdown. Add this app's callback as an
+# authorized redirect URI on the client:
+#   https://<your-dashboard-url>/api/drive/oauth/callback
+#   http://localhost:3000/api/drive/oauth/callback   (for local dev)
+GOOGLE_OAUTH_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-...
 ```
 
-> ⚠️ Only the two `NEXT_PUBLIC_*` values reach the browser. The service-role key
-> and Trello credentials are server-only — never add a `NEXT_PUBLIC_` prefix to
-> them. On Vercel, add all five as project env vars.
+> ⚠️ Only the two `NEXT_PUBLIC_*` values reach the browser. The service-role key,
+> Trello credentials, and Google OAuth secret are server-only — never add a
+> `NEXT_PUBLIC_` prefix to them. On Vercel, add all of them as project env vars.
 
 ---
 
@@ -257,16 +270,20 @@ will log "No enabled channels configured" each poll — that's expected.
 This replaces the old list-ID env vars.
 
 1. Open the dashboard and click **Settings** (top-right).
-2. Under **Add a channel**:
+2. Under **Google Drive**, click **Connect Google Drive** and approve access with
+   the account that owns the episode folders. It should then show "Connected ·
+   you@gmail.com". (To switch accounts later, click **Reconnect** — no redeploy.)
+3. Under **Add a channel**:
    - **Channel name** — e.g. "Bodycam Horror Studio" (becomes the dashboard
      label).
    - **Trello board** — pick from the dropdown.
    - **Source list** — pick from the dropdown (it populates from the board you
      chose). This is the single list the watcher polls.
-   - **Google Drive folder ID** — required. Paste the channel's folder ID from
-     Part B (must be shared with the service-account email).
+   - **Resolve list** — pick the list cards move to when an episode finishes.
+   - **Google Drive folder** — pick from the dropdown (folders in the connected
+     account). Required.
    - **Enabled** — leave checked so the watcher polls it.
-3. **Create channel.** It appears in the list below; you can Edit or Delete it
+4. **Create channel.** It appears in the list below; you can Edit or Delete it
    anytime. Repeat for each channel.
 
 Within ~60s the watcher (Part H) picks up the new channel and starts polling its
@@ -324,6 +341,8 @@ and set in the dashboard, Part J.)*
 | `SUPABASE_SERVICE_ROLE_KEY` | no (server) | Part A, step 4 (service_role secret) |
 | `TRELLO_API_KEY` | no (server) | Part C, step 1 |
 | `TRELLO_TOKEN` | no (server) | Part C, step 2 |
+| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | no (server) | Part F (Web OAuth client) |
+| `GOOGLE_OAUTH_REDIRECT_URI` *(optional)* | no (server) | only if origin ≠ public URL |
 
 ---
 
