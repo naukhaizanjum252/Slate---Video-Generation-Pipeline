@@ -77,6 +77,18 @@ export class TrelloClient {
   }
 
   /**
+   * Return the first VIDEO attachment on a card (the intro clip for video mode),
+   * or null. Matches by mime type first, then by common video extensions.
+   */
+  firstVideoAttachment(card: TrelloCard): TrelloAttachment | null {
+    if (!card.attachments || card.attachments.length === 0) return null;
+    const video =
+      card.attachments.find((a) => (a.mimeType ?? '').startsWith('video/')) ??
+      card.attachments.find((a) => /\.(mp4|mov|webm|m4v|avi|mkv)$/i.test(a.url));
+    return video ?? null;
+  }
+
+  /**
    * Download an attachment to the given destination path. For Trello-hosted
    * uploads we must send the auth header; external URLs are fetched plainly.
    */

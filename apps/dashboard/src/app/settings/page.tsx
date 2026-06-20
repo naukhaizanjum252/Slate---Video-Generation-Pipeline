@@ -9,6 +9,7 @@ import type {
   TrelloListOption,
 } from '@slate/shared';
 import { Shell, PageHeader } from '@/components/Shell';
+import { Select, ConfirmDialog, type ConfirmConfig } from '@/components/ui';
 
 interface FormState {
   id: string | null; // null = creating
@@ -18,6 +19,7 @@ interface FormState {
   trello_resolve_list_id: string;
   drive_folder_id: string;
   enabled: boolean;
+  video_mode: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -28,6 +30,7 @@ const EMPTY_FORM: FormState = {
   trello_resolve_list_id: '',
   drive_folder_id: '',
   enabled: true,
+  video_mode: false,
 };
 
 export default function SettingsPage() {
@@ -43,6 +46,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
 
   const loadChannels = useCallback(async () => {
     const res = await fetch('/api/channels');
@@ -77,7 +81,7 @@ export default function SettingsPage() {
   }, []);
 
   const loadDriveStatus = useCallback(async (): Promise<DriveAuthStatus> => {
-    const res = await fetch('/api/drive/status');
+    const res = await fetch('/api/drive/status', { cache: 'no-store' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Failed to load Drive status');
     setDriveStatus(data as DriveAuthStatus);
@@ -152,6 +156,7 @@ export default function SettingsPage() {
       trello_resolve_list_id: ch.trello_resolve_list_id ?? '',
       drive_folder_id: ch.drive_folder_id ?? '',
       enabled: ch.enabled,
+      video_mode: ch.video_mode ?? false,
     });
     setNotice(null);
     setError(null);
@@ -176,6 +181,7 @@ export default function SettingsPage() {
         trello_resolve_list_id: form.trello_resolve_list_id,
         drive_folder_id: form.drive_folder_id,
         enabled: form.enabled,
+        video_mode: form.video_mode,
       };
       const res = await fetch(form.id ? `/api/channels/${form.id}` : '/api/channels', {
         method: form.id ? 'PUT' : 'POST',
@@ -194,18 +200,25 @@ export default function SettingsPage() {
     }
   }
 
-  async function remove(id: string, name: string) {
-    if (typeof window !== 'undefined' && !window.confirm(`Delete channel "${name}"?`)) return;
-    setError(null);
-    try {
-      const res = await fetch(`/api/channels/${id}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Delete failed');
-      if (form.id === id) resetForm();
-      await loadChannels();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Delete failed');
-    }
+  function remove(id: string, name: string) {
+    setConfirm({
+      title: `Delete channel “${name}”?`,
+      message: 'The watcher will stop polling it. Episodes already processed are unaffected.',
+      confirmLabel: 'Delete channel',
+      danger: true,
+      onConfirm: async () => {
+        setError(null);
+        try {
+          const res = await fetch(`/api/channels/${id}`, { method: 'DELETE' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? 'Delete failed');
+          if (form.id === id) resetForm();
+          await loadChannels();
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'Delete failed');
+        }
+      },
+    });
   }
 
   const canSave =
@@ -259,84 +272,72 @@ export default function SettingsPage() {
           </Field>
 
           <Field label="Trello board">
-            <select
+            <Select
               value={form.trello_board_id}
-              onChange={(e) => onBoardChange(e.target.value)}
-              className={inputCls}
-            >
-              <option value="">Select a board…</option>
-              {boards.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+              onChange={onBoardChange}
+              options={boards.map((b) => ({ value: b.id, label: b.name }))}
+              placeholder="Select a board…"
+              emptyLabel="No boards found"
+            />
           </Field>
 
           <Field label="Source list">
-            <select
+            <Select
               value={form.trello_source_list_id}
-              onChange={(e) => setForm({ ...form, trello_source_list_id: e.target.value })}
+              onChange={(v) => setForm({ ...form, trello_source_list_id: v })}
+              options={lists.map((l) => ({ value: l.id, label: l.name }))}
               disabled={!form.trello_board_id || listsLoading}
-              className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
-            >
-              <option value="">
-                {!form.trello_board_id ? 'Select a board first…' : 'Select a list…'}
-              </option>
-              {lists.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name}
-                </option>
-              ))}
-            </select>
+              placeholder={
+                !form.trello_board_id
+                  ? 'Select a board first…'
+                  : listsLoading
+                    ? 'Loading lists…'
+                    : 'Select a list…'
+              }
+            />
           </Field>
 
           <Field label="Resolve list (cards move here when done)">
-            <select
+            <Select
               value={form.trello_resolve_list_id}
-              onChange={(e) => setForm({ ...form, trello_resolve_list_id: e.target.value })}
+              onChange={(v) => setForm({ ...form, trello_resolve_list_id: v })}
+              options={lists.map((l) => ({ value: l.id, label: l.name }))}
               disabled={!form.trello_board_id || listsLoading}
-              className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
-            >
-              <option value="">
-                {!form.trello_board_id ? 'Select a board first…' : 'Select a list…'}
-              </option>
-              {lists.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name}
-                </option>
-              ))}
-            </select>
+              placeholder={
+                !form.trello_board_id
+                  ? 'Select a board first…'
+                  : listsLoading
+                    ? 'Loading lists…'
+                    : 'Select a list…'
+              }
+            />
           </Field>
 
           <Field label="Google Drive folder">
-            {!driveStatus?.connected ? (
-              <p className="pt-2 text-[12px] text-muted">
-                Connect a Google account above to choose a folder.
+            {/* Paste a folder ID directly… */}
+            <input
+              value={form.drive_folder_id}
+              onChange={(e) => setForm({ ...form, drive_folder_id: e.target.value })}
+              placeholder="Paste a folder ID — or pick from your account below"
+              className={inputCls}
+            />
+            {/* …or pick one from the connected account (fills the field above). */}
+            {driveStatus?.connected && (
+              <div className="mt-2">
+                <Select
+                  value={folders.some((f) => f.id === form.drive_folder_id) ? form.drive_folder_id : ''}
+                  onChange={(v) => v && setForm({ ...form, drive_folder_id: v })}
+                  options={folders.map((f) => ({ value: f.id, label: f.name }))}
+                  disabled={foldersLoading}
+                  placeholder={foldersLoading ? 'Loading folders…' : 'Or pick a folder…'}
+                  emptyLabel="No folders found"
+                />
+              </div>
+            )}
+            {!driveStatus?.connected && (
+              <p className="mt-1.5 text-[11px] text-ghost">
+                Connect a Google account above to pick from a list, or just paste a folder ID.
               </p>
-            ) : (
-              <select
-                value={form.drive_folder_id}
-                onChange={(e) => setForm({ ...form, drive_folder_id: e.target.value })}
-                disabled={foldersLoading}
-                className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-50`}
-              >
-                <option value="">{foldersLoading ? 'Loading folders…' : 'Select a folder…'}</option>
-                {/* Preserve a previously-saved folder even if it isn't in the
-                    current account's list (e.g. editing a channel set on another
-                    account), so editing doesn't silently drop it. */}
-                {form.drive_folder_id &&
-                  !folders.some((f) => f.id === form.drive_folder_id) && (
-                    <option value={form.drive_folder_id}>
-                      Current folder ({form.drive_folder_id})
-                    </option>
-                  )}
-                {folders.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name}
-                  </option>
-                ))}
-              </select>
             )}
           </Field>
 
@@ -349,6 +350,18 @@ export default function SettingsPage() {
                 className="h-4 w-4 accent-brand"
               />
               Watcher polls this channel
+            </label>
+          </Field>
+
+          <Field label="Video mode">
+            <label className="inline-flex cursor-pointer items-center gap-2 pt-2 text-sm text-muted">
+              <input
+                type="checkbox"
+                checked={form.video_mode}
+                onChange={(e) => setForm({ ...form, video_mode: e.target.checked })}
+                className="h-4 w-4 accent-brand"
+              />
+              Build & upload the final video (effect + boom + intro) instead of assets
             </label>
           </Field>
         </div>
@@ -399,6 +412,11 @@ export default function SettingsPage() {
                         disabled
                       </span>
                     )}
+                    {ch.video_mode && (
+                      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                        video
+                      </span>
+                    )}
                   </div>
                   <div className="mt-0.5 truncate font-mono text-[11px] text-ghost">
                     source {ch.trello_source_list_id} · resolve{' '}
@@ -426,6 +444,8 @@ export default function SettingsPage() {
         )}
       </section>
       </main>
+
+      <ConfirmDialog config={confirm} onClose={() => setConfirm(null)} />
     </Shell>
   );
 }

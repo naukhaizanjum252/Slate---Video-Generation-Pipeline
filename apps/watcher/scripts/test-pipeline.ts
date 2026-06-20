@@ -64,6 +64,7 @@ async function main() {
       name: 'TEST',
       driveFolderId: process.env.SLATE_TEST_DRIVE_FOLDER_ID ?? '',
       resolveListId: process.env.SLATE_TEST_RESOLVE_LIST_ID ?? '',
+      videoMode: (process.env.SLATE_TEST_VIDEO_MODE ?? '').toLowerCase() === 'true',
     },
   };
 

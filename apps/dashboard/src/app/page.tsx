@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import type { Episode, EpisodeStatus, PhaseStatus, ProgressStep, TimelinePhase } from '@slate/shared';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { Shell, PageHeader } from '@/components/Shell';
+import { ConfirmDialog, type ConfirmConfig } from '@/components/ui';
 
 const REFRESH_MS = 30_000;
 
@@ -19,6 +20,7 @@ export default function Page() {
   const [query, setQuery] = useState('');
   const [stopping, setStopping] = useState<Set<string>>(new Set());
   const [errorEp, setErrorEp] = useState<Episode | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmConfig | null>(null);
 
   const load = useCallback(async (manual = false) => {
     if (!supabase) {
@@ -73,24 +75,55 @@ export default function Page() {
     [load],
   );
 
+  const confirmStop = useCallback(
+    (ep: Episode) => {
+      setConfirm({
+        title: `Stop “${ep.card_title}”?`,
+        message: 'The watcher cancels this run within ~10 seconds. You can retry it afterward.',
+        confirmLabel: 'Stop episode',
+        danger: true,
+        onConfirm: () => stop(ep),
+      });
+    },
+    [stop],
+  );
+
   const removeEpisode = useCallback(
-    async (ep: Episode, mode: 'delete' | 'retry') => {
-      const msg =
-        mode === 'retry'
-          ? `Retry "${ep.card_title}"? Its current record is cleared and the card is reprocessed (it must still be in the source list).`
-          : `Delete the record for "${ep.card_title}"?`;
-      if (typeof window !== 'undefined' && !window.confirm(msg)) return;
-      try {
-        const res = await fetch(`/api/episodes/${ep.id}`, { method: 'DELETE' });
-        if (!res.ok) {
-          const d = await res.json().catch(() => ({}));
-          throw new Error(d.error ?? 'Failed');
-        }
-        // Optimistically drop it; the watcher re-adds a fresh row on retry.
-        setEpisodes((list) => list.filter((e) => e.id !== ep.id));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed');
-      }
+    (ep: Episode, mode: 'delete' | 'retry') => {
+      setConfirm({
+        title: mode === 'retry' ? `Retry “${ep.card_title}”?` : `Delete “${ep.card_title}”?`,
+        message:
+          mode === 'retry'
+            ? 'The record is reset to queued and the card is reprocessed — it must still be in the source list.'
+            : 'This permanently removes the episode record from the dashboard.',
+        confirmLabel: mode === 'retry' ? 'Retry' : 'Delete',
+        danger: mode === 'delete',
+        onConfirm: async () => {
+          try {
+            const res = await fetch(`/api/episodes/${ep.id}`, {
+              method: mode === 'retry' ? 'PATCH' : 'DELETE',
+            });
+            if (!res.ok) {
+              const d = await res.json().catch(() => ({}));
+              throw new Error(d.error ?? 'Failed');
+            }
+            if (mode === 'retry') {
+              // Keep the row — flip it to queued; the watcher re-picks it in place.
+              setEpisodes((list) =>
+                list.map((e) =>
+                  e.id === ep.id
+                    ? { ...e, status: 'queued', stage: 'Queued', error_message: null, drive_folder_url: null }
+                    : e,
+                ),
+              );
+            } else {
+              setEpisodes((list) => list.filter((e) => e.id !== ep.id));
+            }
+          } catch (e) {
+            setError(e instanceof Error ? e.message : 'Failed');
+          }
+        },
+      });
     },
     [],
   );
@@ -222,7 +255,7 @@ export default function Page() {
                     <Row
                       key={ep.id}
                       ep={ep}
-                      onStop={stop}
+                      onStop={confirmStop}
                       stopping={stopping.has(ep.id)}
                       onRemove={removeEpisode}
                       onShowError={setErrorEp}
@@ -240,6 +273,7 @@ export default function Page() {
       </main>
 
       {errorEp && <ErrorModal ep={errorEp} onClose={() => setErrorEp(null)} />}
+      <ConfirmDialog config={confirm} onClose={() => setConfirm(null)} />
     </Shell>
   );
 }
@@ -785,6 +819,12 @@ function IndeterminateBar() {
 
 function StatusBadge({ status }: { status: EpisodeStatus }) {
   const map: Record<EpisodeStatus, { label: string; cls: string; dot: string; pulse?: boolean }> = {
+    queued: {
+      label: 'Queued',
+      cls: 'border-amber-200 bg-amber-50 text-amber-700',
+      dot: 'bg-amber-500',
+      pulse: true,
+    },
     processing: {
       label: 'Processing',
       cls: 'border-brand/20 bg-brand-soft text-brand-dim',
@@ -812,16 +852,21 @@ function TimeCell({ value }: { value: string | null }) {
   if (!value) return <span className="text-ghost">—</span>;
   const d = new Date(value);
   if (isNaN(d.getTime())) return <span className="text-ghost">—</span>;
-  const abs = d.toLocaleString(undefined, {
+  const datePart = d.toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
+  });
+  const timePart = d.toLocaleTimeString(undefined, {
     hour: '2-digit',
     minute: '2-digit',
   });
+  // Stacked (date over time) so the column stays narrow and doesn't push the
+  // Actions column off the edge — while still showing the full date + time.
   return (
-    <span title={abs} className="whitespace-nowrap text-[13px] text-muted">
-      {relativeTime(d)}
+    <span title={relativeTime(d)} className="block whitespace-nowrap leading-tight text-muted">
+      <span className="block text-[13px]">{datePart}</span>
+      <span className="block text-[11px] text-ghost">{timePart}</span>
     </span>
   );
 }

@@ -24,11 +24,6 @@ import json
 import sys
 import traceback
 
-# Fallback wall-clock budget for the orchestrated step (seconds). The real cap
-# is passed in via --timeout-min from the Node parent (which also runs a stall
-# watchdog); this default only applies if the arg is missing.
-DEFAULT_TIMEOUT = 60 * 60  # 60 minutes
-
 
 def log(msg: str) -> None:
     """Progress logging — stderr only, never stdout."""
@@ -58,7 +53,7 @@ def run(
     image_path: str,
     gradio_url: str,
     enable_build_video: bool,
-    timeout_seconds: int,
+    timeout_seconds,  # int seconds, or None for no cap
     download_only: bool = False,
 ) -> dict:
     # Imported lazily so that an import error becomes a structured result
@@ -211,7 +206,9 @@ def main() -> int:
     parser.add_argument("--timeout-min", type=int, default=0)
     args = parser.parse_args()
 
-    timeout_seconds = args.timeout_min * 60 if args.timeout_min > 0 else DEFAULT_TIMEOUT
+    # > 0 → cap the orchestrated job at that many minutes. <= 0 → no cap (block
+    # until done); the Node parent's stall watchdog kills a wedged run instead.
+    timeout_seconds = args.timeout_min * 60 if args.timeout_min > 0 else None
 
     try:
         result = run(

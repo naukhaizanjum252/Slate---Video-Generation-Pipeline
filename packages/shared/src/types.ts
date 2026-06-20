@@ -1,4 +1,4 @@
-export type EpisodeStatus = 'processing' | 'done' | 'failed' | 'cancelled';
+export type EpisodeStatus = 'queued' | 'processing' | 'done' | 'failed' | 'cancelled';
 
 /** One concurrent sub-task of the current phase (e.g. Images, Voiceover). */
 export interface ProgressStep {
@@ -59,6 +59,12 @@ export interface Channel {
   trello_resolve_list_id: string;
   drive_folder_id: string;
   enabled: boolean;
+  /**
+   * When true, the watcher builds the full episode video (flash/boom effect at
+   * the card's EFFECT_PAUSING_TIMESTAMP + stitched intro) and uploads ONLY that
+   * MP4. When false (default), it uploads the asset bundle as before.
+   */
+  video_mode: boolean;
   created_at: string;
 }
 

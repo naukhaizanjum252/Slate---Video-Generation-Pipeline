@@ -43,3 +43,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Intro editor presets (local user data)
+apps/watcher/intro-presets.json

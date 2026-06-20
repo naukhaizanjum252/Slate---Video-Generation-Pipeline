@@ -68,6 +68,11 @@ create table if not exists episodes (
 
 -- Link episodes to the channel that produced them, plus the live pipeline stage
 -- (added idempotently so this file is safe to run on an existing database).
+-- Per-channel video mode. When true the watcher builds the full MP4 (effect +
+-- boom + stitched intro) and uploads ONLY that video; when false (default) it
+-- uploads the asset bundle as before. Added idempotently.
+alter table channels add column if not exists video_mode boolean not null default false;
+
 alter table episodes add column if not exists channel_id uuid references channels(id);
 alter table episodes add column if not exists channel_name text;
 alter table episodes add column if not exists stage text;

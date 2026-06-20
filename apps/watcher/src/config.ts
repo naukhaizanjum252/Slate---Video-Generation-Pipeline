@@ -53,10 +53,12 @@ export interface Config {
   };
   pythonBin: string;
   pollCron: string;
-  // Hard cap on a single episode's pipeline (minutes). A slow-but-healthy run
-  // is allowed up to this; the stall watchdog catches true freezes sooner.
+  // OPTIONAL absolute cap on a single episode's pipeline (minutes). 0 disables it
+  // (the default) so a slow-but-progressing run can take as long as it needs; the
+  // stall watchdog is then the sole guard. Set > 0 to re-impose a hard ceiling.
   pipelineTimeoutMin: number;
-  // Fail an episode if no progress is reported for this many minutes (a stall).
+  // Primary guard: fail an episode if progress doesn't CHANGE for this many
+  // minutes (a stall). This is what stops wedged runs.
   stallTimeoutMin: number;
   // systemd unit of the Gradio studio — its journal is captured on a failure so
   // the real cause is recorded with the error (set '' to disable).
@@ -69,6 +71,10 @@ export interface Config {
   // When false (default) the pipeline stops after producing the asset bundle
   // and skips the final /cb_build_video step. Flip on later to render video.
   enableBuildVideo: boolean;
+  // How many episodes to process at once. MUST stay within the upstream
+  // 69labs / studio concurrency caps — each episode uses ~4 concurrent image
+  // jobs (and voiceover/script calls), so N episodes need ~4N image slots.
+  maxConcurrentEpisodes: number;
 }
 
 let cached: Config | null = null;
@@ -101,12 +107,14 @@ export function loadConfig(): Config {
     },
     pythonBin: optional('PYTHON_BIN', 'python3'),
     pollCron: optional('POLL_CRON', '*/60 * * * * *'),
-    pipelineTimeoutMin: int('PIPELINE_TIMEOUT_MIN', 60),
+    // Default 0 = no hard cap (int() returns the fallback for unset/0/invalid).
+    pipelineTimeoutMin: int('PIPELINE_TIMEOUT_MIN', 0),
     stallTimeoutMin: int('STALL_TIMEOUT_MIN', 30),
     studioLogUnit: optional('STUDIO_LOG_UNIT', 'bodycam-studio'),
     reuseExisting: bool('REUSE_EXISTING', true),
     probeTimeoutMin: int('PROBE_TIMEOUT_MIN', 2),
     enableBuildVideo: bool('ENABLE_BUILD_VIDEO', false),
+    maxConcurrentEpisodes: int('MAX_CONCURRENT_EPISODES', 5),
   };
   return cached;
 }

@@ -9,6 +9,7 @@ import { TrelloClient, type TrelloCard, type TrelloAttachment } from './trello';
 import { DriveUploader } from './drive';
 import { EpisodeStore } from './supabase';
 import type { Config } from './config';
+import { applyFreezeFlashBoom, prependIntro, findEpisodeVideo, resolveBoomSfx } from './video';
 
 const log = createLogger('pipeline');
 
@@ -38,6 +39,8 @@ export interface JobChannel {
   driveFolderId: string;
   /** Trello list to move the card to when done (empty = don't move). */
   resolveListId: string;
+  /** When true: build the final video (effect + boom + intro), upload only it. */
+  videoMode: boolean;
 }
 
 export interface PipelineJob {
@@ -47,6 +50,10 @@ export interface PipelineJob {
   episodeName: string;
   attachment: TrelloAttachment;
   channel: JobChannel;
+  /** Intro clip to prepend in video mode (first video attachment), if any. */
+  introAttachment?: TrelloAttachment | null;
+  /** Seconds into the episode for the freeze+flash+boom effect, if specified. */
+  effectTimestampSec?: number | null;
 }
 
 /**
@@ -59,20 +66,32 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   const { cfg, trello, drive, store } = deps;
   log.info(`Starting pipeline for "${job.cardTitle}" (${job.episodeName})`);
 
-  // Temp resources to clean up no matter what.
+  // Temp resources to clean up no matter what. (Video-mode temps are managed
+  // locally inside finalizeVideo's own try/finally.)
   let imageTmp: tmp.FileResult | null = null;
   let unzipDir: tmp.DirResult | null = null;
 
+  // ── Video mode ─────────────────────────────────────────────────────
+  // Per-channel: build the full MP4 (effect + boom + intro) and upload ONLY that
+  // video. `buildVideo` forces the studio's build-video step on (the global env
+  // flag also still works for non-video channels).
+  const videoMode = job.channel.videoMode;
+  const buildVideo = cfg.enableBuildVideo || videoMode;
+  const hasEffect = videoMode && typeof job.effectTimestampSec === 'number' && job.effectTimestampSec > 0;
+  const hasIntro = videoMode && !!job.introAttachment;
+
   // ── Pipeline timeline ──────────────────────────────────────────────
-  // Ordered phases for this run (build-video only when enabled). Persisted to
-  // Supabase and kept after the run so the dashboard can show a full stepper.
+  // Ordered phases for this run. Persisted to Supabase and kept after the run so
+  // the dashboard can show a full stepper.
   const phaseDefs: { key: string; label: string }[] = [
     { key: 'Downloading reference', label: 'Reference image' },
     { key: 'Enhancing reference', label: 'Enhance reference' },
     { key: 'Generating script & assets', label: 'Script & assets' },
-    ...(cfg.enableBuildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
+    ...(buildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
     { key: 'Packaging files', label: 'Package files' },
     { key: 'Unpacking bundle', label: 'Unpack bundle' },
+    ...(hasEffect ? [{ key: 'Applying effect', label: 'Effect & boom' }] : []),
+    ...(hasIntro ? [{ key: 'Stitching intro', label: 'Stitch intro' }] : []),
     { key: 'Uploading to Drive', label: 'Upload to Drive' },
   ];
   let currentKey = '';
@@ -144,15 +163,9 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     return { dir, root: collapseSingleRoot(dir.name) };
   };
 
-  // Upload to Drive, mark done, then move the card to the resolve list + comment
-  // (best-effort). Shared by the normal and reuse paths.
-  const uploadAndFinalize = async (rootDir: string): Promise<void> => {
-    setStage('Uploading to Drive');
-    const driveUrl = await drive.uploadEpisodeFolder(
-      job.cardTitle,
-      rootDir,
-      job.channel.driveFolderId,
-    );
+  // Mark done in Supabase, then move the card to the resolve list + comment
+  // (best-effort). Shared by both upload paths.
+  const finalizeDone = async (driveUrl: string): Promise<void> => {
     await store.markDone(job.cardId, driveUrl, timelineAllDone());
     log.info(`✅ Completed "${job.cardTitle}" -> ${driveUrl}`);
     if (job.channel.resolveListId) {
@@ -166,6 +179,74 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
       log.warn(`[${job.channel.name}] No resolve list configured — card left in source list`);
     }
   };
+
+  // Asset-bundle path: upload the whole unzipped bundle.
+  const uploadAndFinalize = async (rootDir: string): Promise<void> => {
+    setStage('Uploading to Drive');
+    const driveUrl = await drive.uploadEpisodeFolder(
+      job.cardTitle,
+      rootDir,
+      job.channel.driveFolderId,
+    );
+    await finalizeDone(driveUrl);
+  };
+
+  // Video-mode path: find the built MP4, apply the effect + stitch the intro,
+  // then upload ONLY the final video (in a folder named after the card). Manages
+  // its own temp dir/file cleanup in a local finally.
+  const finalizeVideo = async (rootDir: string): Promise<void> => {
+    const mainVideo = findEpisodeVideo(rootDir);
+    if (!mainVideo) {
+      throw new Error(
+        'Video mode: no MP4 found in the built bundle. Confirm the studio build-video step produced a video.',
+      );
+    }
+    const work = tmp.dirSync({ prefix: 'slate-video-', unsafeCleanup: true });
+    let introFile: tmp.FileResult | null = null;
+    try {
+      let current = mainVideo;
+
+      if (hasEffect) {
+        setStage('Applying effect');
+        const fxOut = path.join(work.name, 'fx.mp4');
+        current = await applyFreezeFlashBoom(current, job.effectTimestampSec as number, resolveBoomSfx(), fxOut);
+      }
+
+      if (hasIntro) {
+        setStage('Stitching intro');
+        const intro = job.introAttachment as TrelloAttachment;
+        introFile = tmp.fileSync({ prefix: 'slate-intro-', postfix: guessVideoExt(intro) });
+        await trello.downloadAttachment(intro, introFile.name);
+        const stitched = path.join(work.name, 'final.mp4');
+        current = await prependIntro(introFile.name, current, stitched);
+      }
+
+      // Stage only the final video for upload, named after the card.
+      const uploadDir = path.join(work.name, 'upload');
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const finalPath = path.join(uploadDir, `${sanitizeFilename(job.cardTitle)}.mp4`);
+      fs.copyFileSync(current, finalPath);
+
+      setStage('Uploading to Drive');
+      const driveUrl = await drive.uploadEpisodeFolder(job.cardTitle, uploadDir, job.channel.driveFolderId);
+      await finalizeDone(driveUrl);
+    } finally {
+      try {
+        introFile?.removeCallback();
+      } catch {
+        /* ignore */
+      }
+      try {
+        work.removeCallback();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  // Dispatch to the right finalize path based on the channel's mode.
+  const finalize = (rootDir: string): Promise<void> =>
+    videoMode ? finalizeVideo(rootDir) : uploadAndFinalize(rootDir);
 
   const handlePyFailure = async (
     result: { kind: 'cancel' | 'stall' | 'error'; error: string; details?: string },
@@ -198,7 +279,7 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
           brief: job.brief,
           imagePath: 'none',
           gradioUrl: cfg.gradio.baseUrl,
-          enableBuildVideo: cfg.enableBuildVideo,
+          enableBuildVideo: buildVideo,
           timeoutMin: cfg.probeTimeoutMin,
           downloadOnly: true,
         },
@@ -211,9 +292,9 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
       if (probe.success && fs.existsSync(probe.zip_path)) {
         const { dir, root } = unzipBundle(probe.zip_path);
         unzipDir = dir;
-        if (isCompleteBundle(root, cfg.enableBuildVideo)) {
+        if (isCompleteBundle(root, buildVideo)) {
           log.info(`♻️  Reusing existing output for "${job.cardTitle}" — skipping generation`);
-          await uploadAndFinalize(root);
+          await finalize(root);
           return;
         }
         log.info(`Existing output incomplete — regenerating "${job.cardTitle}"`);
@@ -244,7 +325,7 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
         brief: job.brief,
         imagePath: imageTmp.name,
         gradioUrl: cfg.gradio.baseUrl,
-        enableBuildVideo: cfg.enableBuildVideo,
+        enableBuildVideo: buildVideo,
         timeoutMin: cfg.pipelineTimeoutMin,
         downloadOnly: false,
       },
@@ -267,11 +348,11 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
       return;
     }
 
-    // 3. Unzip the bundle, then 4. upload + finalize.
+    // 3. Unzip the bundle, then 4. finalize (assets bundle, or video post-processing).
     setStage('Unpacking bundle');
     const { dir, root } = unzipBundle(result.zip_path);
     unzipDir = dir;
-    await uploadAndFinalize(root);
+    await finalize(root);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error(`❌ Pipeline error for "${job.cardTitle}": ${message}`, err);
@@ -315,9 +396,11 @@ interface PyArgs {
  * on spawn-level failures or unparseable output; pipeline logic failures come
  * back as { success: false } which the caller handles.
  *
- * Two safety nets: a HARD timeout (`pipelineTimeoutMs`) caps the whole run, and
- * a STALL watchdog fails fast if no PROGRESS update arrives for `stallTimeoutMs`
- * (so a wedged image/voiceover step surfaces clearly instead of hanging).
+ * Primary guard: a STALL watchdog that fails fast if progress doesn't CHANGE for
+ * `stallTimeoutMs` — so a slow-but-advancing run is allowed to finish while a
+ * truly wedged step (including one stuck re-emitting the same status) is killed.
+ * A HARD timeout (`pipelineTimeoutMs`) is an OPTIONAL absolute ceiling, disabled
+ * when <= 0 (the default for full runs) and still used to bound the reuse probe.
  */
 function runPythonPipeline(
   args: PyArgs,
@@ -351,32 +434,42 @@ function runPythonPipeline(
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
     let cancelTimer: ReturnType<typeof setInterval> | undefined;
     let stallTimer: ReturnType<typeof setInterval> | undefined;
-    // Liveness for stall detection: bumped on every PROGRESS line.
+    // Liveness for stall detection: bumped only when progress actually CHANGES
+    // (see the stderr handler), so a run that keeps re-emitting the same status
+    // without advancing still trips the stall watchdog.
     let lastProgressAt = Date.now();
     let lastProgressLabel = '';
+    let lastProgressPayload = '';
 
     const tail = () => stderr.trim().split('\n').slice(-40).join('\n').slice(-1800);
 
     const cleanup = () => {
-      clearTimeout(timer);
+      if (hardTimer) clearTimeout(hardTimer);
       if (cancelTimer) clearInterval(cancelTimer);
       if (stallTimer) clearInterval(stallTimer);
     };
 
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      child.kill('SIGKILL');
-      resolve({
-        success: false,
-        kind: 'error',
-        error: `Hard timeout after ${Math.round(pipelineTimeoutMs / 60000)}m`,
-        details: tail(),
-      });
-    }, pipelineTimeoutMs);
+    // Optional absolute ceiling. Disabled when pipelineTimeoutMs <= 0 — the main
+    // run then relies solely on the stall watchdog, so a slow-but-progressing
+    // episode is allowed to finish. Still used to bound the quick reuse probe,
+    // which passes a positive value. When armed, it kills even a healthy run.
+    if (pipelineTimeoutMs > 0) {
+      hardTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        child.kill('SIGKILL');
+        resolve({
+          success: false,
+          kind: 'error',
+          error: `Hard timeout after ${Math.round(pipelineTimeoutMs / 60000)}m`,
+          details: tail(),
+        });
+      }, pipelineTimeoutMs);
+    }
 
     // Stall watchdog: if no PROGRESS arrives for stallTimeoutMs, the studio/69labs
     // step is wedged — kill and report a stall (distinct from the hard timeout).
@@ -419,8 +512,14 @@ function runPythonPipeline(
         log.info(`[py] ${trimmed}`);
         const m = trimmed.match(/PROGRESS (\{.*\})\s*$/);
         if (m) {
-          // Any new PROGRESS line means the pipeline is alive — reset the stall timer.
-          lastProgressAt = Date.now();
+          // Only a CHANGED payload counts as real forward movement. Resetting on
+          // every line (even an identical one) would let a wedged-but-chatty
+          // studio keep the stall watchdog alive forever — which matters now
+          // that the hard cap can be disabled.
+          if (m[1] !== lastProgressPayload) {
+            lastProgressPayload = m[1];
+            lastProgressAt = Date.now();
+          }
           try {
             const parsed = JSON.parse(m[1]) as { phase?: string; steps?: ProgressStep[] };
             if (parsed && typeof parsed.phase === 'string') {
@@ -523,6 +622,26 @@ function guessImageExt(att: TrelloAttachment): string {
   if ((att.mimeType ?? '').includes('png')) return '.png';
   if ((att.mimeType ?? '').includes('jpeg')) return '.jpg';
   return '.png';
+}
+
+function guessVideoExt(att: TrelloAttachment): string {
+  const fromName = path.extname(att.name || '');
+  if (fromName) return fromName;
+  try {
+    const fromUrl = path.extname(new URL(att.url).pathname);
+    if (fromUrl) return fromUrl;
+  } catch {
+    /* ignore */
+  }
+  if ((att.mimeType ?? '').includes('webm')) return '.webm';
+  if ((att.mimeType ?? '').includes('quicktime')) return '.mov';
+  return '.mp4';
+}
+
+/** Make a card title safe to use as a single filename. */
+function sanitizeFilename(name: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return (cleaned || 'episode').slice(0, 120);
 }
 
 /**

@@ -39,6 +39,7 @@ export function validateChannel(body: unknown): ValidationResult {
     trello_resolve_list_id: (b.trello_resolve_list_id as string).trim(),
     drive_folder_id: (b.drive_folder_id as string).trim(),
     enabled: b.enabled === undefined ? true : Boolean(b.enabled),
+    video_mode: Boolean(b.video_mode),
   };
   return { value };
 }

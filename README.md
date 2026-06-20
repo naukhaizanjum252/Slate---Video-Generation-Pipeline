@@ -39,8 +39,9 @@ slate/
    new card it writes a `processing` row to Supabase (before running anything, so
    a restart can't double-trigger). De-duplication is entirely Supabase-driven via
    the unique `trello_card_id`.
-3. New cards are added to a single in-process FIFO queue and processed **one at a
-   time** by a sequential worker (see Design notes). `pipeline.py` drives the
+3. New cards are added to an in-process FIFO queue and processed by a
+   bounded-concurrency dispatcher (up to `MAX_CONCURRENT_EPISODES` at once — see
+   Design notes). `pipeline.py` drives the
    Gradio endpoints — `/cb_pipeline_enhance` → `/cb_orchestrated_pipeline` →
    `/cb_download_all` (plus an optional `/cb_build_video`) — and returns a zip path.
 4. The bundle is unzipped and uploaded to a new Drive folder named after the card
@@ -51,8 +52,33 @@ slate/
    never crashes.
 
 **Channels** (one row per YouTube channel) hold the Trello board, the source list,
-the resolve list, and a Drive folder. They are managed from the dashboard's
-**Settings** page — there are no list IDs in any env file.
+the resolve list, a Drive folder, and a **video-mode** toggle. They are managed
+from the dashboard's **Settings** page — there are no list IDs in any env file.
+
+### Video mode (per-channel)
+
+When a channel's **Video mode** toggle is on, the watcher produces a finished
+video instead of an asset bundle:
+
+1. Builds the full episode MP4 (forces the studio's build-video step).
+2. If the card description contains `EFFECT_PAUSING_TIMESTAMP: <time>` (accepts
+   `HH:MM:SS`, `MM:SS`, or seconds), applies a **freeze + white flash + boom SFX**
+   at that point in the episode.
+3. If the card has a **video attachment**, stitches it onto the **front** as an
+   intro (normalized to the episode's resolution/fps).
+4. Uploads **only** the final MP4 to Drive (no asset bundle).
+
+Requirements: **ffmpeg + ffprobe** on the watcher host (the studio droplet already
+has them), and the boom SFX at `apps/watcher/src/assets/sfx/boom.wav` (or set
+`BOOM_SFX_PATH`). With the toggle **off**, the channel behaves exactly as before
+(asset bundle to Drive). Card with no intro attachment → the video is delivered
+without an intro; no effect timestamp → no flash/boom.
+
+> 🎬 **Richer intro compositor (name plate, slow zoom, flash/glitch clips,
+> captions, watermark)** — built and tuned via the `test-video-ui` editor, but
+> **not yet wired into production** (the steps above still run the first-cut
+> effect). Full reference, assets, knobs, and the remaining wiring work:
+> **[`apps/watcher/INTRO_COMPOSITOR.md`](apps/watcher/INTRO_COMPOSITOR.md)**.
 
 ## Dashboard features
 
@@ -181,9 +207,9 @@ Notes:
 - `pipeline.py` is run from `apps/watcher/src/` (the build does **not** copy it into
   `dist/`), so keep the `src/` tree on the server after building.
 - `/tmp/gradio` cleanup runs automatically at 3 AM UTC daily via a built-in cron.
-- Never run two watcher instances at once — episodes are processed sequentially to
-  respect the 69labs image-generation concurrency cap, and queue state is in-memory
-  per process.
+- Never run two watcher instances at once — concurrency is bounded *within* one
+  process (`MAX_CONCURRENT_EPISODES`) to respect the 69labs/studio caps; a second
+  instance shares none of that state and would blow the caps.
 
 ---
 
@@ -221,12 +247,15 @@ key (which bypasses RLS).
 | `GOOGLE_OAUTH_REFRESH_TOKEN` *(optional)* | Fallback Drive token, used only if no account is connected in the dashboard (see `get-drive-token` script) |
 | `ENABLE_BUILD_VIDEO` *(optional)* | Render the final MP4 (`/cb_build_video`); default `false` (asset bundle only) |
 | `POLL_CRON` *(optional)* | 6-field cron, default every 60s (`*/60 * * * * *`) |
-| `PIPELINE_TIMEOUT_MIN` *(optional)* | Hard cap on one episode (default 60) |
-| `STALL_TIMEOUT_MIN` *(optional)* | Fail if no progress reported for this long (default 30) |
+| `MAX_CONCURRENT_EPISODES` *(optional)* | Episodes processed at once (default 5). Must fit the 69labs/studio caps (~4 image slots per episode); set 1 for strictly sequential |
+| `PIPELINE_TIMEOUT_MIN` *(optional)* | Optional absolute hard cap on one episode; **default 0 = disabled** (a progressing run can take as long as it needs). Set > 0 to re-impose a ceiling |
+| `STALL_TIMEOUT_MIN` *(optional)* | Primary guard: fail if progress doesn't **change** for this long (default 30) |
 | `STUDIO_LOG_UNIT` *(optional)* | systemd unit whose journal is captured into errors (default `bodycam-studio`; blank to disable) |
 | `REUSE_EXISTING` *(optional)* | Reuse an already-generated bundle if found (default `true`) |
 | `PROBE_TIMEOUT_MIN` *(optional)* | Max wait on the reuse probe (default 2) |
 | `PYTHON_BIN` *(optional)* | Path to python3 (default `python3`) |
+| `FFMPEG_BIN` / `FFPROBE_BIN` *(optional)* | Video-mode binaries (default `ffmpeg` / `ffprobe` on PATH) |
+| `BOOM_SFX_PATH` *(optional)* | Override the boom SFX (default `apps/watcher/src/assets/sfx/boom.wav`) |
 
 > Drive uploads use **OAuth** (the watcher uploads as the real account that owns the
 > folder). Service accounts can't store files in a personal Gmail Drive — they have
@@ -270,11 +299,13 @@ The uploading account is chosen in the dashboard, not on the droplet:
 
 ## Design notes
 
-- **Sequential single-worker queue.** 69labs caps us at 4 concurrent image jobs and
-  each episode already uses that full budget (16 images in ~4 rounds of 4), so
-  episodes are processed strictly **one at a time**. The cron loop only discovers and
-  *claims* cards (it never blocks on a running pipeline); a single worker drains a
-  FIFO queue, fully awaiting each episode before starting the next.
+- **Bounded-concurrency queue.** The cron loop only discovers and *claims* cards
+  (it never blocks on a running pipeline); a dispatcher then runs up to
+  `MAX_CONCURRENT_EPISODES` pipelines at once, pulling the next from a FIFO queue
+  as slots free up. This **must stay within the upstream 69labs / studio caps** —
+  each episode uses ~4 concurrent image jobs, so N episodes need ~4N image slots
+  (plus voiceover/script capacity). Set `MAX_CONCURRENT_EPISODES=1` for the old
+  strictly-sequential behavior.
 - **Co-located with the pipeline.** The watcher runs on the **same droplet** as the
   Gradio studio app, so `GRADIO_BASE_URL` points at `http://localhost:7860`.
 - **Crash-proof.** Every pipeline run is wrapped in try/catch/finally; failures are
@@ -284,9 +315,11 @@ The uploading account is chosen in the dashboard, not on the droplet:
   unique `trello_card_id` plus an in-memory `claimed` set prevent double-processing
   across restarts and overlapping ticks. Cards stay in the source list; status is
   tracked in Supabase, not by moving cards (they move only to the resolve list on done).
-- **Two safety nets per run.** A hard timeout caps the whole run; a separate stall
-  watchdog fails fast if no progress is reported for `STALL_TIMEOUT_MIN`, so a wedged
-  step surfaces clearly instead of hanging.
+- **Stall watchdog is the guard.** A run is killed only if its progress doesn't
+  *change* for `STALL_TIMEOUT_MIN` (default 30m) — so a slow-but-advancing episode
+  finishes, while a truly wedged step (including one stuck re-emitting the same
+  status) is caught. An absolute hard cap (`PIPELINE_TIMEOUT_MIN`) is optional and
+  **off by default**; set it > 0 only if you want a ceiling regardless of progress.
 - **Cancellable.** The dashboard's Stop button sets `cancel_requested`; the watcher
   polls it (~10s), kills the running pipeline or drops it from the queue, and marks
   the episode `cancelled`.

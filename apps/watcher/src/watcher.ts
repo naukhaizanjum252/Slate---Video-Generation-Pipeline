@@ -7,55 +7,64 @@ import { DriveUploader } from './drive';
 import { EpisodeStore } from './supabase';
 import type { Channel } from '@slate/shared';
 import { runPipeline, type PipelineDeps, type PipelineJob, type JobChannel } from './pipeline';
+import { parseEffect } from './effects';
 
 const log = createLogger('watcher');
 
 /**
- * Sequential processing model.
+ * Bounded-concurrency processing model.
  *
- * 69labs caps us at 4 concurrent image jobs, and each episode already uses that
- * full budget (16 images in ~4 rounds of 4). Running two episodes at once would
- * double that and blow the cap — so episodes are processed strictly ONE AT A
- * TIME through a single in-process worker fed by a FIFO queue.
+ * Up to `cfg.maxConcurrentEpisodes` pipelines run at once, fed by a FIFO queue;
+ * a new job starts as soon as a slot frees up. This MUST stay within the
+ * upstream 69labs / studio caps — each episode uses ~4 concurrent image jobs (so
+ * N episodes need ~4N image slots) plus voiceover/script calls.
  *
- * - `claimed` — card IDs pulled off the Trello queue (moved to Processing +
- *   recorded in Supabase) and either waiting in `queue` or actively running.
- *   Stops the same card being enqueued twice across cron ticks.
- * - `queue`   — pending jobs, processed in arrival order.
+ * - `claimed` — card IDs pulled off a Trello source list (recorded in Supabase)
+ *   and either waiting in `queue` or actively running. Stops the same card being
+ *   enqueued twice across cron ticks.
+ * - `queue`       — pending jobs, started in arrival order.
+ * - `activeCount` — pipelines currently running.
  * - Supabase's unique `trello_card_id` is the durable cross-restart guard.
  */
 const claimed = new Set<string>();
 const queue: PipelineJob[] = [];
-let workerRunning = false;
+let activeCount = 0;
 
 /**
- * Drain the queue one job at a time. Each pipeline is fully awaited before the
- * next starts, keeping us within the 69labs concurrency cap. Self-contained and
- * never throws — runPipeline records its own failures.
+ * Start as many queued jobs as the concurrency budget allows, then return. Each
+ * job re-invokes pump() when it finishes so the next one starts immediately.
  */
-async function drainQueue(deps: PipelineDeps): Promise<void> {
-  if (workerRunning) return;
-  workerRunning = true;
+function pump(deps: PipelineDeps): void {
+  while (activeCount < deps.cfg.maxConcurrentEpisodes && queue.length > 0) {
+    const job = queue.shift() as PipelineJob;
+    activeCount++;
+    void runJob(job, deps).finally(() => {
+      activeCount--;
+      pump(deps); // a slot freed — pull the next job
+    });
+  }
+}
+
+/**
+ * Process one job. Self-contained and never throws — runPipeline records its own
+ * failures; this just guards the claim bookkeeping.
+ */
+async function runJob(job: PipelineJob, deps: PipelineDeps): Promise<void> {
   try {
-    while (queue.length > 0) {
-      const job = queue.shift() as PipelineJob;
-      try {
-        // Honor a stop requested while the job was still waiting in the queue.
-        if (await deps.store.isCancelRequested(job.cardId)) {
-          await deps.store.markCancelled(job.cardId);
-          log.info(`🛑 Cancelled "${job.cardTitle}" before it started`);
-          continue;
-        }
-        log.info(
-          `Processing "${job.cardTitle}" (${job.episodeName}) — ${queue.length} still queued`,
-        );
-        await runPipeline(job, deps);
-      } finally {
-        claimed.delete(job.cardId);
-      }
+    // Honor a stop requested while the job was still waiting in the queue.
+    if (await deps.store.isCancelRequested(job.cardId)) {
+      await deps.store.markCancelled(job.cardId);
+      log.info(`🛑 Cancelled "${job.cardTitle}" before it started`);
+      return;
     }
+    log.info(
+      `Processing "${job.cardTitle}" (${job.episodeName}) — ${activeCount} running, ${queue.length} queued`,
+    );
+    await runPipeline(job, deps);
+  } catch (err) {
+    log.error(`Worker error on "${job.cardTitle}"`, err);
   } finally {
-    workerRunning = false;
+    claimed.delete(job.cardId);
   }
 }
 
@@ -127,10 +136,12 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
 
     try {
       // Cards are never moved out of the source list, so de-dupe is entirely
-      // Supabase-driven: if we've already recorded this card, skip it. This is
-      // what stops the same card being reprocessed every poll.
-      if (await store.existsForCard(card.id)) {
-        // Already handled (processing/done/failed) — quietly skip.
+      // Supabase-driven: skip cards we've already recorded. EXCEPTION: a `queued`
+      // row is a dashboard-requested retry — fall through and reprocess it in place
+      // (insertProcessing updates the existing row, so the dashboard row never
+      // vanishes the way deleting + re-inserting did).
+      const existingStatus = await store.statusForCard(card.id);
+      if (existingStatus && existingStatus !== 'queued') {
         continue;
       }
 
@@ -139,8 +150,15 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
         name: channel.name,
         driveFolderId: channel.drive_folder_id,
         resolveListId: channel.trello_resolve_list_id,
+        videoMode: channel.video_mode === true,
       };
       const episodeName = episodeNameFromCard(card);
+
+      // Parse the optional effect directive out of the description; the cleaned
+      // brief (directive removed) is what we send on for generation. In video
+      // mode, also grab the first video attachment as the intro to prepend.
+      const { effectTimestampSec, cleanedBrief } = parseEffect(card.desc ?? '');
+      const introAttachment = jobChannel.videoMode ? trello.firstVideoAttachment(card) : null;
 
       const attachment = trello.firstImageAttachment(card);
       if (!attachment) {
@@ -170,20 +188,22 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
       const job: PipelineJob = {
         cardId: card.id,
         cardTitle: card.name,
-        brief: card.desc ?? '',
+        brief: cleanedBrief,
         episodeName,
         attachment,
         channel: jobChannel,
+        introAttachment,
+        effectTimestampSec,
       };
 
-      // Enqueue for the single sequential worker and kick it. The worker runs
-      // jobs one at a time; if it's already running, this just adds to the tail.
+      // Enqueue and kick the dispatcher. It starts the job immediately if a
+      // concurrency slot is free, otherwise it waits its turn in the queue.
       claimed.add(card.id);
       queue.push(job);
       log.info(
         `[${channel.name}] Queued "${card.name}" (${episodeName}) — position ${queue.length} in queue`,
       );
-      void drainQueue(deps).catch((err) => log.error('Worker crashed', err));
+      pump(deps);
     } catch (err) {
       // Claiming failed (e.g. Trello/Supabase hiccup). The card stays in the
       // source list and is retried next tick. Never crash the loop.
@@ -217,6 +237,7 @@ export function startWatcher(): void {
 
   log.info('Slate watcher starting');
   log.info(`Polling enabled channels' Trello queues on "${cfg.pollCron}"`);
+  log.info(`Processing up to ${cfg.maxConcurrentEpisodes} episode(s) concurrently`);
 
   // Prevent overlapping ticks from stacking up if a poll runs long.
   let running = false;

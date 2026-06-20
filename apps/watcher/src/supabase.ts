@@ -44,7 +44,11 @@ export class EpisodeStore {
     return (data ?? []) as Channel[];
   }
 
-  /** Insert a new processing row. Returns the created episode. */
+  /**
+   * Claim a card for processing. If a row already exists for the card (a `queued`
+   * retry), it's UPDATED in place — clearing stale failure/output fields — so the
+   * dashboard row never disappears. Otherwise a fresh row is inserted.
+   */
   async insertProcessing(params: {
     trelloCardId: string;
     cardTitle: string;
@@ -52,23 +56,57 @@ export class EpisodeStore {
     channelId?: string | null;
     channelName?: string | null;
   }): Promise<Episode> {
+    const base = {
+      card_title: params.cardTitle,
+      episode_name: params.episodeName,
+      status: 'processing' as EpisodeStatus,
+      stage: 'Queued',
+      progress: null,
+      channel_id: params.channelId ?? null,
+      channel_name: params.channelName ?? null,
+    };
+    const { data: existing } = await this.client
+      .from('episodes')
+      .select('id')
+      .eq('trello_card_id', params.trelloCardId)
+      .maybeSingle();
+    if (existing) {
+      const { data, error } = await this.client
+        .from('episodes')
+        .update({
+          ...base,
+          error_message: null,
+          drive_folder_url: null,
+          timeline: null,
+          completed_at: null,
+          cancel_requested: false,
+        })
+        .eq('trello_card_id', params.trelloCardId)
+        .select()
+        .single();
+      if (error) throw new Error(`Supabase reclaim failed: ${error.message}`);
+      log.info(`Re-claimed episode ${params.episodeName} (card ${params.trelloCardId})`);
+      return data as Episode;
+    }
     const { data, error } = await this.client
       .from('episodes')
-      .insert({
-        trello_card_id: params.trelloCardId,
-        card_title: params.cardTitle,
-        episode_name: params.episodeName,
-        status: 'processing' as EpisodeStatus,
-        stage: 'Queued',
-        progress: null,
-        channel_id: params.channelId ?? null,
-        channel_name: params.channelName ?? null,
-      })
+      .insert({ trello_card_id: params.trelloCardId, ...base })
       .select()
       .single();
     if (error) throw new Error(`Supabase insert failed: ${error.message}`);
     log.info(`Inserted episode ${params.episodeName} (card ${params.trelloCardId})`);
     return data as Episode;
+  }
+
+  /** Current status for a card's episode row, or null if none exists. */
+  async statusForCard(trelloCardId: string): Promise<EpisodeStatus | null> {
+    const { data, error } = await this.client
+      .from('episodes')
+      .select('status')
+      .eq('trello_card_id', trelloCardId)
+      .maybeSingle();
+    if (error) throw new Error(`Supabase status lookup failed: ${error.message}`);
+    return (data?.status as EpisodeStatus) ?? null;
   }
 
   /** Has the dashboard requested this card be stopped? */
