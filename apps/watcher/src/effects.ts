@@ -16,16 +16,34 @@ export interface ParsedEffect {
   cleanedBrief: string;
 }
 
+/**
+ * Pull the subject name out of a card description (video mode). Convention:
+ *     INTRO_SUBJECT_NAME: Sal Cangelosi
+ * Takes the rest of that line. Returns null if absent.
+ */
+export function parseSubjectName(brief: string): string | null {
+  if (!brief) return null;
+  // Trello escapes underscores in descriptions (INTRO\_SUBJECT\_NAME) to avoid
+  // markdown italics — undo that before matching.
+  const text = brief.replace(/\\_/g, '_');
+  const m = text.match(/INTRO_SUBJECT_NAME\s*[:=]?\s*(.+)/i);
+  if (!m) return null;
+  const name = m[1].split(/\r?\n/)[0].trim();
+  return name || null;
+}
+
 export function parseEffect(brief: string): ParsedEffect {
-  if (!brief) return { effectTimestampSec: null, cleanedBrief: brief ?? '' };
+  // Trello escapes underscores (EFFECT\_PAUSING\_TIMESTAMP) — undo before matching.
+  const text = (brief ?? '').replace(/\\_/g, '_');
+  if (!text) return { effectTimestampSec: null, cleanedBrief: text };
   // Value is digit groups separated by ':' or '.' (e.g. 90, 1:30, or 01.30).
   const re = new RegExp(`${EFFECT_KEY}\\s*[:=]?\\s*([0-9]+(?:[:.][0-9]+){0,2})`, 'i');
-  const m = brief.match(re);
-  if (!m) return { effectTimestampSec: null, cleanedBrief: brief };
+  const m = text.match(re);
+  if (!m) return { effectTimestampSec: null, cleanedBrief: text };
   const effectTimestampSec = timestampToSeconds(m[1]);
   // Strip the directive (and collapse the blank space it leaves) before the
   // brief is sent on for script generation.
-  const cleanedBrief = brief.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim();
+  const cleanedBrief = text.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim();
   return { effectTimestampSec, cleanedBrief };
 }
 

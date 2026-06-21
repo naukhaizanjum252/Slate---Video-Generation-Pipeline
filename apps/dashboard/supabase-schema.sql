@@ -73,6 +73,24 @@ create table if not exists episodes (
 -- uploads the asset bundle as before. Added idempotently.
 alter table channels add column if not exists video_mode boolean not null default false;
 
+-- Edited-intro options: when edit_intro_only is on the watcher also builds the
+-- edited intro (using intro_preset_id) and uploads it to the channel's Drive folder.
+alter table channels add column if not exists edit_intro_only boolean not null default false;
+alter table channels add column if not exists intro_preset_id uuid;
+
+-- ─── Intro presets ──────────────────────────────────────────────────────────
+-- Saved intro-editor presets (relative-style params), shared by the editor (save),
+-- the dashboard channel form (pick), and the watcher (build the intro). Service-role
+-- only (RLS on, no policy) — read/written via server-side routes / the watcher.
+create table if not exists intro_presets (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  channel text not null default '',
+  params jsonb not null,
+  created_at timestamptz default now()
+);
+alter table intro_presets enable row level security;
+
 alter table episodes add column if not exists channel_id uuid references channels(id);
 alter table episodes add column if not exists channel_name text;
 alter table episodes add column if not exists stage text;

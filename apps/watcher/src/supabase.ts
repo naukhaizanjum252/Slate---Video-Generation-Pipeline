@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Channel, Episode, EpisodeStatus, ProgressStep, TimelinePhase } from '@slate/shared';
+import type { Channel, Episode, EpisodeStatus, IntroPreset, ProgressStep, TimelinePhase } from '@slate/shared';
 import { createLogger } from './logger';
 import type { Config } from './config';
 
@@ -134,6 +134,42 @@ export class EpisodeStore {
         else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT')
           log.warn(`Realtime subscription ${status} — retries will fall back to the poll interval`);
       });
+  }
+
+  /* ── Intro presets ── */
+
+  async listIntroPresets(): Promise<IntroPreset[]> {
+    const { data, error } = await this.client
+      .from('intro_presets')
+      .select('id, name, channel, params')
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(`Supabase preset list failed: ${error.message}`);
+    return (data ?? []) as IntroPreset[];
+  }
+
+  async getIntroPreset(id: string): Promise<IntroPreset | null> {
+    const { data, error } = await this.client
+      .from('intro_presets')
+      .select('id, name, channel, params')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`Supabase preset lookup failed: ${error.message}`);
+    return (data as IntroPreset) ?? null;
+  }
+
+  async createIntroPreset(p: { name: string; channel: string; params: Record<string, unknown> }): Promise<IntroPreset> {
+    const { data, error } = await this.client
+      .from('intro_presets')
+      .insert({ name: p.name, channel: p.channel, params: p.params })
+      .select('id, name, channel, params')
+      .single();
+    if (error) throw new Error(`Supabase preset create failed: ${error.message}`);
+    return data as IntroPreset;
+  }
+
+  async deleteIntroPreset(id: string): Promise<void> {
+    const { error } = await this.client.from('intro_presets').delete().eq('id', id);
+    if (error) throw new Error(`Supabase preset delete failed: ${error.message}`);
   }
 
   /** Has the dashboard requested this card be stopped? */

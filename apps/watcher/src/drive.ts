@@ -80,6 +80,25 @@ export class DriveUploader {
     return id;
   }
 
+  /**
+   * Create a subfolder named `folderName` under the channel's Drive folder, upload
+   * the file into it, make the folder link-viewable, and return the folder URL.
+   * Used for the edited intro so it lands in a per-episode folder (like episodes).
+   */
+  async uploadFileToNewFolder(filePath: string, folderName: string, parentFolderId: string): Promise<string> {
+    const parent = (parentFolderId ?? '').trim();
+    if (!parent) {
+      throw new Error('No Drive folder configured for this channel. Pick one in Settings.');
+    }
+    await this.ensureAuth();
+    const folderId = await this.createFolder(folderName, parent);
+    await this.uploadFile(filePath, folderId);
+    await this.setPublicRead(folderId);
+    const url = `https://drive.google.com/drive/folders/${folderId}`;
+    log.info(`Uploaded ${path.basename(filePath)} -> ${url}`);
+    return url;
+  }
+
   private async uploadFile(filePath: string, parentId: string): Promise<void> {
     const name = path.basename(filePath);
     await this.drive.files.create({

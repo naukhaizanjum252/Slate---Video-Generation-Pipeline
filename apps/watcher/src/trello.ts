@@ -88,6 +88,26 @@ export class TrelloClient {
     return video ?? null;
   }
 
+  /** Return the first AUDIO attachment on a card (the intro voiceover), or null. */
+  firstAudioAttachment(card: TrelloCard): TrelloAttachment | null {
+    if (!card.attachments || card.attachments.length === 0) return null;
+    const audio =
+      card.attachments.find((a) => (a.mimeType ?? '').startsWith('audio/')) ??
+      card.attachments.find((a) => /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(a.url));
+    return audio ?? null;
+  }
+
+  /** Return the first SUBTITLE attachment (.srt/.vtt) — captions for the intro. */
+  firstSubtitleAttachment(card: TrelloCard): TrelloAttachment | null {
+    if (!card.attachments || card.attachments.length === 0) return null;
+    const re = /\.(srt|vtt)(\?|$)/i;
+    return (
+      card.attachments.find((a) => re.test(a.url || '')) ??
+      card.attachments.find((a) => re.test(a.name || '')) ??
+      null
+    );
+  }
+
   /**
    * Download an attachment to the given destination path. For Trello-hosted
    * uploads we must send the auth header; external URLs are fetched plainly.

@@ -9,7 +9,10 @@ import { TrelloClient, type TrelloCard, type TrelloAttachment } from './trello';
 import { DriveUploader } from './drive';
 import { EpisodeStore } from './supabase';
 import type { Config } from './config';
-import { applyFreezeFlashBoom, prependIntro, findEpisodeVideo, resolveBoomSfx } from './video';
+import { applyFreezeFlashBoom, prependIntro, findEpisodeVideo, resolveBoomSfx, probeVideo } from './video';
+import { buildIntroSpec } from './intro';
+import { specFromPreset } from './introPreset';
+import { autoCaptionSrt } from './captions';
 
 const log = createLogger('pipeline');
 
@@ -41,6 +44,10 @@ export interface JobChannel {
   resolveListId: string;
   /** When true: build the final video (effect + boom + intro), upload only it. */
   videoMode: boolean;
+  /** When true: also build the edited intro (via the compositor) and upload it to Drive. */
+  editIntroOnly: boolean;
+  /** Saved intro-editor preset id driving the edited intro's look (or null). */
+  introPresetId: string | null;
 }
 
 export interface PipelineJob {
@@ -52,6 +59,12 @@ export interface PipelineJob {
   channel: JobChannel;
   /** Intro clip to prepend in video mode (first video attachment), if any. */
   introAttachment?: TrelloAttachment | null;
+  /** Intro voiceover (first audio attachment), for the edited-intro build. */
+  voiceoverAttachment?: TrelloAttachment | null;
+  /** Caption SRT/VTT attachment for the intro (wins over auto-caption), if any. */
+  captionsAttachment?: TrelloAttachment | null;
+  /** Subject name (INTRO_SUBJECT_NAME) shown on the edited intro's name plate. */
+  subjectName?: string | null;
   /** Seconds into the episode for the freeze+flash+boom effect, if specified. */
   effectTimestampSec?: number | null;
 }
@@ -76,24 +89,32 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   // video. `buildVideo` forces the studio's build-video step on (the global env
   // flag also still works for non-video channels).
   const videoMode = job.channel.videoMode;
+  const introOnly = videoMode && job.channel.editIntroOnly;
   const buildVideo = cfg.enableBuildVideo || videoMode;
   const hasEffect = videoMode && typeof job.effectTimestampSec === 'number' && job.effectTimestampSec > 0;
   const hasIntro = videoMode && !!job.introAttachment;
 
   // ── Pipeline timeline ──────────────────────────────────────────────
   // Ordered phases for this run. Persisted to Supabase and kept after the run so
-  // the dashboard can show a full stepper.
-  const phaseDefs: { key: string; label: string }[] = [
-    { key: 'Downloading reference', label: 'Reference image' },
-    { key: 'Enhancing reference', label: 'Enhance reference' },
-    { key: 'Generating script & assets', label: 'Script & assets' },
-    ...(buildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
-    { key: 'Packaging files', label: 'Package files' },
-    { key: 'Unpacking bundle', label: 'Unpack bundle' },
-    ...(hasEffect ? [{ key: 'Applying effect', label: 'Effect & boom' }] : []),
-    ...(hasIntro ? [{ key: 'Stitching intro', label: 'Stitch intro' }] : []),
-    { key: 'Uploading to Drive', label: 'Upload to Drive' },
-  ];
+  // the dashboard can show a full stepper. Intro-only skips studio generation, so
+  // it has its own short timeline rather than the full-generation phases.
+  const phaseDefs: { key: string; label: string }[] = introOnly
+    ? [
+        { key: 'Downloading intro', label: 'Download intro' },
+        { key: 'Editing intro', label: 'Edit intro' },
+        { key: 'Uploading to Drive', label: 'Upload to Drive' },
+      ]
+    : [
+        { key: 'Downloading reference', label: 'Reference image' },
+        { key: 'Enhancing reference', label: 'Enhance reference' },
+        { key: 'Generating script & assets', label: 'Script & assets' },
+        ...(buildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
+        { key: 'Packaging files', label: 'Package files' },
+        { key: 'Unpacking bundle', label: 'Unpack bundle' },
+        ...(hasEffect ? [{ key: 'Applying effect', label: 'Effect & boom' }] : []),
+        ...(hasIntro ? [{ key: 'Stitching intro', label: 'Stitch intro' }] : []),
+        { key: 'Uploading to Drive', label: 'Upload to Drive' },
+      ];
   let currentKey = '';
   const stepsByPhase: Record<string, ProgressStep[]> = {};
 
@@ -244,6 +265,69 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     }
   };
 
+  // Build the edited intro (compositor + the channel's preset) from the card's
+  // video attachment and upload it to the channel's Drive folder. Best-effort: a
+  // failure here is logged but never fails the (already-completed) episode.
+  const buildEditedIntro = async (): Promise<string> => {
+    const intro = job.introAttachment;
+    if (!intro) {
+      throw new Error('No video attachment on the card to build the intro from.');
+    }
+    const work = tmp.dirSync({ prefix: 'slate-introbuild-', unsafeCleanup: true });
+    try {
+      setStage('Downloading intro');
+      const introPath = path.join(work.name, `intro${guessVideoExt(intro)}`);
+      await trello.downloadAttachment(intro, introPath);
+      let voPath: string | null = null;
+      if (job.voiceoverAttachment) {
+        const ext = path.extname((job.voiceoverAttachment.url || '').split('?')[0]) || '.mp3';
+        voPath = path.join(work.name, `vo${ext}`);
+        await trello.downloadAttachment(job.voiceoverAttachment, voPath);
+      }
+      const introInfo = await probeVideo(introPath);
+      const voInfo = voPath ? await probeVideo(voPath) : null;
+      const params = job.channel.introPresetId
+        ? (await store.getIntroPreset(job.channel.introPresetId))?.params ?? null
+        : null;
+      const spec = specFromPreset(params, {
+        clipDuration: introInfo.duration,
+        voDuration: voInfo?.duration ?? 0,
+        subjectName: job.subjectName ?? '',
+        pauseAtSec: job.effectTimestampSec ?? 0,
+      });
+      setStage('Editing intro');
+      // Captions: a card SRT/VTT attachment wins; otherwise auto-caption the
+      // voiceover (Whisper). Both skip gracefully (no SRT + no key → no captions).
+      let captionsSrt: string | null = null;
+      if (job.captionsAttachment) {
+        captionsSrt = path.join(work.name, 'captions.srt');
+        await trello.downloadAttachment(job.captionsAttachment, captionsSrt);
+      } else if (voPath) {
+        captionsSrt = await autoCaptionSrt(voPath, work.name);
+      }
+      log.info(
+        `[${job.channel.name}] intro build — name="${spec.subjectName}" ` +
+          `nameplate=${spec.hasText !== false && !!spec.subjectName ? 'on' : 'off'} ` +
+          `preset=${job.channel.introPresetId ?? 'default'} captions=${captionsSrt ? 'yes' : 'none'} ` +
+          `clip=${introInfo.duration.toFixed(1)}s vo=${(voInfo?.duration ?? 0).toFixed(1)}s`,
+      );
+      const outPath = path.join(work.name, `${job.episodeName}-intro.mp4`);
+      await buildIntroSpec(introPath, voPath, spec, outPath, captionsSrt);
+      setStage('Uploading to Drive');
+      // Upload into a per-episode subfolder (named like the card) — not loose in
+      // the channel's parent folder.
+      const url = await drive.uploadFileToNewFolder(outPath, job.cardTitle, job.channel.driveFolderId);
+      log.info(`[${job.channel.name}] edited intro uploaded -> ${url}`);
+      return url;
+    } finally {
+      try {
+        work.removeCallback();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
   // Dispatch to the right finalize path based on the channel's mode.
   const finalize = (rootDir: string): Promise<void> =>
     videoMode ? finalizeVideo(rootDir) : uploadAndFinalize(rootDir);
@@ -270,6 +354,14 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   };
 
   try {
+    // Intro-only: skip studio generation entirely — just edit the card's intro
+    // clip with the channel's preset and upload it to Drive.
+    if (introOnly) {
+      const introUrl = await buildEditedIntro();
+      await finalizeDone(introUrl);
+      return;
+    }
+
     // 0. Reuse: probe for an already-complete bundle and skip generation if found.
     if (cfg.reuseExisting) {
       setStage('Checking for existing output');

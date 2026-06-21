@@ -65,11 +65,31 @@ export interface Channel {
    * MP4. When false (default), it uploads the asset bundle as before.
    */
   video_mode: boolean;
+  /**
+   * When true, the watcher also builds the edited intro (via the compositor +
+   * `intro_preset_id`) from the card's video attachment and uploads it to the
+   * channel's Drive folder, in addition to the channel's normal output.
+   */
+  edit_intro_only: boolean;
+  /** Saved intro-editor preset that drives the edited intro's look (or null). */
+  intro_preset_id: string | null;
   created_at: string;
 }
 
 /** Fields accepted when creating/updating a channel (no server-managed keys). */
 export type ChannelInput = Omit<Channel, 'id' | 'created_at'>;
+
+/**
+ * A saved intro-editor preset (the relative-style params from the editor's
+ * deriveParams), reusable across clips and selectable per channel. `params` is the
+ * editor's parameter object (numbers + flash/glitch/audio arrays), stored as jsonb.
+ */
+export interface IntroPreset {
+  id: string;
+  name: string;
+  channel: string;
+  params: Record<string, unknown>;
+}
 
 /**
  * Connection state of the single Google account used for Drive uploads, as

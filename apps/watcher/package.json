@@ -11,6 +11,7 @@
     "test-pipeline": "ts-node scripts/test-pipeline.ts",
     "test-video": "ts-node scripts/test-video.ts",
     "test-video-ui": "ts-node scripts/test-video-ui.ts",
+    "migrate-presets": "ts-node scripts/migrate-presets.ts",
     "get-drive-token": "ts-node scripts/get-drive-token.ts"
   },
   "dependencies": {

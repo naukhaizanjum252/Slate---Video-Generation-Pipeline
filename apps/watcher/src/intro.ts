@@ -444,7 +444,7 @@ function shiftSrt(srcSrt: string, offsetSec: number, destSrt: string): void {
 
 // Caption look (white, bold, black outline, bottom-centre) — like the reference.
 const CAPTION_STYLE =
-  "FontName=Arial,Fontsize=18,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=60";
+  "FontName=Arial,Fontsize=18,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.4,Shadow=0,Alignment=2,MarginV=60";
 
 /**
  * Build the intro from an absolute timeline spec. Returns outPath. `captionsSrtPath`

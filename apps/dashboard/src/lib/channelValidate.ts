@@ -32,6 +32,11 @@ export function validateChannel(body: unknown): ValidationResult {
     return { error: 'Source and resolve lists must be different' };
   }
 
+  const introPresetId =
+    typeof b.intro_preset_id === 'string' && b.intro_preset_id.trim() !== ''
+      ? b.intro_preset_id.trim()
+      : null;
+
   const value: ChannelInput = {
     name: (b.name as string).trim(),
     trello_board_id: (b.trello_board_id as string).trim(),
@@ -40,6 +45,8 @@ export function validateChannel(body: unknown): ValidationResult {
     drive_folder_id: (b.drive_folder_id as string).trim(),
     enabled: b.enabled === undefined ? true : Boolean(b.enabled),
     video_mode: Boolean(b.video_mode),
+    edit_intro_only: Boolean(b.edit_intro_only),
+    intro_preset_id: introPresetId,
   };
   return { value };
 }

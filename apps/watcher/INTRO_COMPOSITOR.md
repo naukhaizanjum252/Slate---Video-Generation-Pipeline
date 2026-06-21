@@ -193,8 +193,29 @@ the only caller of `buildIntroSpec` today.
 ```bash
 FFMPEG_BIN=~/Downloads/ffmpeg FFPROBE_BIN=~/Downloads/ffprobe \
   pnpm --filter @slate/watcher test-video-ui
-# open the printed http://HOST:PORT  (HOST/PORT env-overridable)
+# open the printed http://HOST:PORT  (VIDEO_TEST_HOST/VIDEO_TEST_PORT env-overridable)
 ```
+
+The editor server itself lives in `src/introEditor.ts` (exported `startIntroEditor()`);
+`scripts/test-video-ui.ts` is just a local launcher.
+
+**Runs in-process with the watcher (production):** set `INTRO_EDITOR=true` in the
+watcher's env (optional `INTRO_EDITOR_PORT`, default 5174; binds `0.0.0.0`) and it
+boots alongside the watcher on the droplet — the ffmpeg box — so there's nothing
+separate to build or run. It can't run on Vercel (no ffmpeg), which is why it lives here.
+
+**Dashboard tab (proxied embed):** set `NEXT_PUBLIC_INTRO_EDITOR_URL` to the editor's
+origin (e.g. `http://<droplet-ip>:5174`). The dashboard then (a) shows an **Intro Editor**
+nav tab, and (b) **proxies** the editor under its own origin via a `next.config` rewrite
+(`/editor-app/:path* → ${NEXT_PUBLIC_INTRO_EDITOR_URL}/:path*`); `/editor` iframes
+`/editor-app/`. So the browser stays same-origin/https and the editor host needs **no https/cert**
+(plain http is fine — Vercel forwards server-side). The editor's client fetches are relative so
+they resolve under `/editor-app/`. Rebuild the dashboard after setting the env.
+
+Caveats of proxying through Vercel: large uploads (intro clip) may hit Vercel's request-body
+limit and long renders may hit its proxy response timeout. If you hit either, expose the editor
+directly over https (Caddy/tunnel) and point the iframe at that URL instead. Also note the editor
+has no auth — opening its port publicly exposes it; restrict by firewall or add a token guard.
 
 Use: upload an intro clip (+ optional voiceover + optional SRT) → drag the FREEZE/BLACK blocks,
 flash/glitch/name markers, and audio clips → set props (Subject name, Zoom speed, Flash s,

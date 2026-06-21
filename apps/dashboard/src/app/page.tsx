@@ -225,45 +225,29 @@ export default function Page() {
             <FilterTabs filter={filter} onFilter={setFilter} counts={counts} />
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px] border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-[11px] font-semibold uppercase tracking-wider text-ghost">
-                  <Th className="pl-5">Episode</Th>
-                  <Th>Channel</Th>
-                  <Th className="min-w-[260px]">Status</Th>
-                  <Th>Created</Th>
-                  <Th>Completed</Th>
-                  <Th>Drive</Th>
-                  <Th>Error</Th>
-                  <Th className="pr-5 text-right">Actions</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading && episodes.length === 0 ? (
-                  <SkeletonRows />
-                ) : visible.length === 0 ? (
-                  <EmptyRow
-                    text={
-                      episodes.length === 0
-                        ? 'No episodes yet. Add a card to a channel’s source list to get started.'
-                        : 'No episodes match your filters.'
-                    }
-                  />
-                ) : (
-                  visible.map((ep) => (
-                    <Row
-                      key={ep.id}
-                      ep={ep}
-                      onStop={confirmStop}
-                      stopping={stopping.has(ep.id)}
-                      onRemove={removeEpisode}
-                      onShowError={setErrorEp}
-                    />
-                  ))
-                )}
-              </tbody>
-            </table>
+          <div className="divide-y divide-hairsoft">
+            {loading && episodes.length === 0 ? (
+              <SkeletonRows />
+            ) : visible.length === 0 ? (
+              <EmptyRow
+                text={
+                  episodes.length === 0
+                    ? 'No episodes yet. Add a card to a channel’s source list to get started.'
+                    : 'No episodes match your filters.'
+                }
+              />
+            ) : (
+              visible.map((ep) => (
+                <Row
+                  key={ep.id}
+                  ep={ep}
+                  onStop={confirmStop}
+                  stopping={stopping.has(ep.id)}
+                  onRemove={removeEpisode}
+                  onShowError={setErrorEp}
+                />
+              ))
+            )}
           </div>
         </div>
 
@@ -471,11 +455,7 @@ function SearchBox({ query, onQuery }: { query: string; onQuery: (q: string) => 
   );
 }
 
-/* ─────────────────────────── Table ─────────────────────────── */
-
-function Th({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  return <th className={`px-4 py-3 font-semibold ${className}`}>{children}</th>;
-}
+/* ─────────────────────────── Episode list ─────────────────────────── */
 
 function Row({
   ep,
@@ -492,120 +472,130 @@ function Row({
 }) {
   const [open, setOpen] = useState(false);
   const hasTimeline = (ep.timeline?.length ?? 0) > 0;
+  const isProcessing = ep.status === 'processing';
   return (
-    <>
-    <tr className="border-t border-hairsoft transition-colors hover:bg-sunken/40">
-      <td className="py-4 pl-5 pr-4">
+    <div className="transition-colors hover:bg-sunken/40">
+      <div className="flex items-center gap-4 px-5 py-4">
         {hasTimeline ? (
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className="flex items-start gap-2 text-left"
             title={open ? 'Hide pipeline' : 'Show pipeline'}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ghost transition-colors hover:bg-sunken hover:text-ink"
           >
             <IconChevron open={open} />
-            <span>
-              <span className="block font-medium text-ink">{ep.card_title}</span>
-              <span className="mt-0.5 block font-mono text-[11px] text-ghost">{ep.episode_name}</span>
-            </span>
           </button>
         ) : (
-          <div className="pl-6">
-            <div className="font-medium text-ink">{ep.card_title}</div>
-            <div className="mt-0.5 font-mono text-[11px] text-ghost">{ep.episode_name}</div>
-          </div>
+          <span className="h-7 w-7 shrink-0" />
         )}
-      </td>
-      <td className="px-4 py-4">
-        {ep.channel_name ? (
-          <span className="inline-flex items-center rounded-md border border-hair bg-canvas px-2 py-0.5 text-[12px] text-muted">
-            {ep.channel_name}
-          </span>
-        ) : (
-          <span className="text-ghost">—</span>
-        )}
-      </td>
-      <td className="px-4 py-4 align-top">
-        <StatusBadge status={ep.status} />
-        {ep.status === 'processing' && (ep.stage || (ep.progress?.length ?? 0) > 0) && (
-          <StageProgress stage={ep.stage} steps={ep.progress ?? []} />
-        )}
-      </td>
-      <td className="px-4 py-4">
-        <TimeCell value={ep.created_at} />
-      </td>
-      <td className="px-4 py-4">
-        <TimeCell value={ep.completed_at} />
-      </td>
-      <td className="px-4 py-4">
-        {ep.drive_folder_url ? (
-          <a
-            href={ep.drive_folder_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-hair bg-card px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:border-brand/40 hover:text-brand"
-          >
-            Open
-            <IconExternal />
-          </a>
-        ) : (
-          <span className="text-ghost">—</span>
-        )}
-      </td>
-      <td className="max-w-[240px] px-4 py-4 align-top">
-        {ep.error_message ? (
-          <button
-            type="button"
-            onClick={() => onShowError(ep)}
-            title="View full error"
-            className="block max-w-full truncate text-left text-[13px] text-rose-600 underline decoration-rose-300 decoration-dotted underline-offset-2 hover:text-rose-700"
-          >
-            {ep.error_message.split('\n')[0]}
-          </button>
-        ) : (
-          <span className="text-ghost">—</span>
-        )}
-      </td>
-      <td className="py-4 pl-4 pr-5 text-right">
-        {ep.status === 'processing' ? (
-          <button
-            onClick={() => onStop(ep)}
-            disabled={stopping}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <IconStop />
-            {stopping ? 'Stopping…' : 'Stop'}
-          </button>
-        ) : (
-          <div className="inline-flex items-center justify-end gap-2">
-            {(ep.status === 'failed' || ep.status === 'cancelled') && (
-              <button
-                onClick={() => onRemove(ep, 'retry')}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-soft px-2.5 py-1 text-xs font-medium text-brand-dim transition-colors hover:bg-brand/10"
-              >
-                <IconRetry />
-                Retry
-              </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-semibold text-ink">{ep.card_title}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-ghost">
+            <span className="font-mono">{ep.episode_name}</span>
+            {ep.channel_name && (
+              <>
+                <Dot />
+                <span className="rounded-md border border-hair bg-sunken px-1.5 py-0.5 font-medium text-muted">
+                  {ep.channel_name}
+                </span>
+              </>
             )}
-            <button
-              onClick={() => onRemove(ep, 'delete')}
-              title="Delete record"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-hair bg-card px-2 py-1 text-xs font-medium text-muted transition-colors hover:border-rose-200 hover:text-rose-600"
-            >
-              <IconTrash />
-            </button>
+            <Dot />
+            <TimeMeta created={ep.created_at} completed={ep.completed_at} />
           </div>
-        )}
-      </td>
-    </tr>
-    {open && hasTimeline && (
-      <tr className="border-t border-hairsoft bg-sunken/30">
-        <td colSpan={8} className="px-6 pb-7 pt-3">
+          {isProcessing && (ep.stage || (ep.progress?.length ?? 0) > 0) && (
+            <StageProgress stage={ep.stage} steps={ep.progress ?? []} />
+          )}
+          {ep.error_message && (
+            <button
+              type="button"
+              onClick={() => onShowError(ep)}
+              title="View full error"
+              className="mt-1.5 block max-w-full truncate text-left text-[12px] text-rose-600 underline decoration-rose-300 decoration-dotted underline-offset-2 hover:text-rose-700"
+            >
+              {ep.error_message.split('\n')[0]}
+            </button>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2.5">
+          <StatusBadge status={ep.status} />
+          {ep.drive_folder_url && (
+            <a
+              href={ep.drive_folder_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-hair bg-card px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:border-brand/40 hover:text-brand"
+            >
+              Open
+              <IconExternal />
+            </a>
+          )}
+          {isProcessing ? (
+            <button
+              onClick={() => onStop(ep)}
+              disabled={stopping}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <IconStop />
+              {stopping ? 'Stopping…' : 'Stop'}
+            </button>
+          ) : (
+            <>
+              {(ep.status === 'failed' || ep.status === 'cancelled') && (
+                <button
+                  onClick={() => onRemove(ep, 'retry')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-soft px-2.5 py-1.5 text-xs font-medium text-brand-dim transition-colors hover:bg-brand/10"
+                >
+                  <IconRetry />
+                  Retry
+                </button>
+              )}
+              <button
+                onClick={() => onRemove(ep, 'delete')}
+                title="Delete record"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-hair bg-card text-muted transition-colors hover:border-rose-200 hover:text-rose-600"
+              >
+                <IconTrash />
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {open && hasTimeline && (
+        <div className="border-t border-hairsoft bg-sunken/30 px-5 pb-7 pt-4">
           <EpisodeStepper timeline={ep.timeline ?? []} />
-        </td>
-      </tr>
-    )}
-    </>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Dot() {
+  return <span aria-hidden className="text-ghost/60">·</span>;
+}
+
+function TimeMeta({ created, completed }: { created: string | null; completed: string | null }) {
+  const c = created ? new Date(created) : null;
+  if (!c || isNaN(c.getTime())) return <span className="text-ghost">—</span>;
+  const dateStr = c.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const ctime = c.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  let tail = '';
+  const d = completed ? new Date(completed) : null;
+  if (d && !isNaN(d.getTime())) {
+    const sameDay = d.toDateString() === c.toDateString();
+    const dtime = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    tail = sameDay
+      ? ` → ${dtime}`
+      : ` → ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${dtime}`;
+  }
+  return (
+    <span title={relativeTime(c)} className="whitespace-nowrap">
+      {dateStr}, {ctime}
+      {tail}
+    </span>
   );
 }
 
@@ -848,39 +838,22 @@ function StatusBadge({ status }: { status: EpisodeStatus }) {
   );
 }
 
-function TimeCell({ value }: { value: string | null }) {
-  if (!value) return <span className="text-ghost">—</span>;
-  const d = new Date(value);
-  if (isNaN(d.getTime())) return <span className="text-ghost">—</span>;
-  const datePart = d.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-  const timePart = d.toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  // Stacked (date over time) so the column stays narrow and doesn't push the
-  // Actions column off the edge — while still showing the full date + time.
+function EmptyRow({ text }: { text: string }) {
   return (
-    <span title={relativeTime(d)} className="block whitespace-nowrap leading-tight text-muted">
-      <span className="block text-[13px]">{datePart}</span>
-      <span className="block text-[11px] text-ghost">{timePart}</span>
-    </span>
+    <div className="px-6 py-16 text-center">
+      <div className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl border border-hair bg-sunken text-ghost">
+        <IconInbox />
+      </div>
+      <p className="text-sm text-muted">{text}</p>
+    </div>
   );
 }
 
-function EmptyRow({ text }: { text: string }) {
+function Shimmer({ className = '' }: { className?: string }) {
   return (
-    <tr>
-      <td colSpan={8} className="px-6 py-16 text-center">
-        <div className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl border border-hair bg-sunken text-ghost">
-          <IconInbox />
-        </div>
-        <p className="text-sm text-muted">{text}</p>
-      </td>
-    </tr>
+    <div className={`relative overflow-hidden rounded-md bg-sunken ${className}`}>
+      <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/70 to-transparent" />
+    </div>
   );
 }
 
@@ -888,16 +861,14 @@ function SkeletonRows() {
   return (
     <>
       {Array.from({ length: 5 }).map((_, i) => (
-        <tr key={i} className="border-t border-hairsoft">
-          {Array.from({ length: 8 }).map((__, j) => (
-            <td key={j} className={`py-4 ${j === 0 ? 'pl-5 pr-4' : 'px-4'}`}>
-              <div className="relative overflow-hidden rounded-md bg-sunken">
-                <div className={`h-3.5 ${j === 0 ? 'w-40' : 'w-20'} rounded-md`} />
-                <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/70 to-transparent" />
-              </div>
-            </td>
-          ))}
-        </tr>
+        <div key={i} className="flex items-center gap-4 px-5 py-4">
+          <span className="h-7 w-7 shrink-0" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <Shimmer className="h-3.5 w-56" />
+            <Shimmer className="h-3 w-72" />
+          </div>
+          <Shimmer className="h-6 w-24 shrink-0" />
+        </div>
       ))}
     </>
   );

@@ -7,7 +7,8 @@ import { DriveUploader } from './drive';
 import { EpisodeStore } from './supabase';
 import type { Channel } from '@slate/shared';
 import { runPipeline, type PipelineDeps, type PipelineJob, type JobChannel } from './pipeline';
-import { parseEffect } from './effects';
+import { parseEffect, parseSubjectName } from './effects';
+import { startIntroEditor } from './introEditor';
 
 const log = createLogger('watcher');
 
@@ -151,6 +152,8 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
         driveFolderId: channel.drive_folder_id,
         resolveListId: channel.trello_resolve_list_id,
         videoMode: channel.video_mode === true,
+        editIntroOnly: channel.edit_intro_only === true,
+        introPresetId: channel.intro_preset_id ?? null,
       };
       const episodeName = episodeNameFromCard(card);
 
@@ -158,12 +161,22 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
       // brief (directive removed) is what we send on for generation. In video
       // mode, also grab the first video attachment as the intro to prepend.
       const { effectTimestampSec, cleanedBrief } = parseEffect(card.desc ?? '');
-      const introAttachment = jobChannel.videoMode ? trello.firstVideoAttachment(card) : null;
+      // Intro-only edits the card's VIDEO attachment (no studio generation).
+      const introOnly = jobChannel.videoMode && jobChannel.editIntroOnly;
+      const wantsIntro = jobChannel.videoMode || jobChannel.editIntroOnly;
+      const introAttachment = wantsIntro ? trello.firstVideoAttachment(card) : null;
+      const voiceoverAttachment = jobChannel.editIntroOnly ? trello.firstAudioAttachment(card) : null;
+      const captionsAttachment = jobChannel.editIntroOnly ? trello.firstSubtitleAttachment(card) : null;
+      const subjectName = jobChannel.editIntroOnly ? parseSubjectName(card.desc ?? '') : null;
 
-      const attachment = trello.firstImageAttachment(card);
-      if (!attachment) {
-        log.warn(`[${channel.name}] Card "${card.name}" has no image — recording as failed`);
-        // Record as failed so it isn't retried every tick.
+      // Intro-only needs the video attachment (no reference image); every other
+      // mode needs the reference image to generate from.
+      const imageAttachment = trello.firstImageAttachment(card);
+      if (introOnly ? !introAttachment : !imageAttachment) {
+        const reason = introOnly
+          ? 'No video attachment on card for intro-only build'
+          : 'No reference image attachment on card';
+        log.warn(`[${channel.name}] Card "${card.name}" — ${reason}`);
         await store.insertProcessing({
           trelloCardId: card.id,
           cardTitle: card.name,
@@ -171,9 +184,10 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
           channelId: channel.id,
           channelName: channel.name,
         });
-        await store.markFailed(card.id, 'No reference image attachment on card');
+        await store.markFailed(card.id, reason);
         continue;
       }
+      const attachment = (imageAttachment ?? introAttachment)!;
 
       // Claim the card in Supabase BEFORE running the pipeline so a restart
       // won't re-trigger it (the row's existence is the durable guard).
@@ -193,6 +207,9 @@ async function pollChannel(channel: Channel, deps: PipelineDeps): Promise<void> 
         attachment,
         channel: jobChannel,
         introAttachment,
+        voiceoverAttachment,
+        captionsAttachment,
+        subjectName,
         effectTimestampSec,
       };
 
@@ -238,6 +255,21 @@ export function startWatcher(): void {
   log.info('Slate watcher starting');
   log.info(`Polling enabled channels' Trello queues on "${cfg.pollCron}"`);
   log.info(`Processing up to ${cfg.maxConcurrentEpisodes} episode(s) concurrently`);
+
+  // Optionally run the intro editor in-process. It needs ffmpeg (which lives here,
+  // not on Vercel), so the dashboard's "Intro Editor" tab points at this server
+  // (NEXT_PUBLIC_INTRO_EDITOR_URL) instead of running its own copy.
+  if (process.env.INTRO_EDITOR === 'true') {
+    try {
+      startIntroEditor({
+        host: process.env.INTRO_EDITOR_HOST || '0.0.0.0',
+        port: Number(process.env.INTRO_EDITOR_PORT) || 5174,
+        store: deps.store,
+      });
+    } catch (err) {
+      log.error('Failed to start the in-process intro editor', err);
+    }
+  }
 
   // Single guarded entry point so the cron, the startup poll, and the realtime
   // trigger never overlap (a poll just discovers + enqueues; it returns fast).

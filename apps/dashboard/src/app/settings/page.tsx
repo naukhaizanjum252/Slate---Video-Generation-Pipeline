@@ -5,11 +5,12 @@ import type {
   Channel,
   DriveAuthStatus,
   DriveFolderOption,
+  IntroPreset,
   TrelloBoardOption,
   TrelloListOption,
 } from '@slate/shared';
 import { Shell, PageHeader } from '@/components/Shell';
-import { Select, ConfirmDialog, type ConfirmConfig } from '@/components/ui';
+import { Select, Toggle, ConfirmDialog, type ConfirmConfig } from '@/components/ui';
 
 interface FormState {
   id: string | null; // null = creating
@@ -20,6 +21,8 @@ interface FormState {
   drive_folder_id: string;
   enabled: boolean;
   video_mode: boolean;
+  edit_intro_only: boolean;
+  intro_preset_id: string; // '' = none
 }
 
 const EMPTY_FORM: FormState = {
@@ -31,6 +34,8 @@ const EMPTY_FORM: FormState = {
   drive_folder_id: '',
   enabled: true,
   video_mode: false,
+  edit_intro_only: false,
+  intro_preset_id: '',
 };
 
 export default function SettingsPage() {
@@ -40,6 +45,7 @@ export default function SettingsPage() {
   const [driveStatus, setDriveStatus] = useState<DriveAuthStatus | null>(null);
   const [folders, setFolders] = useState<DriveFolderOption[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(false);
+  const [presets, setPresets] = useState<IntroPreset[]>([]);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [loading, setLoading] = useState(true);
   const [listsLoading, setListsLoading] = useState(false);
@@ -60,6 +66,15 @@ export default function SettingsPage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Failed to load Trello boards');
     setBoards(data as TrelloBoardOption[]);
+  }, []);
+
+  const loadPresets = useCallback(async () => {
+    try {
+      const res = await fetch('/api/intro-presets', { cache: 'no-store' });
+      if (res.ok) setPresets((await res.json()) as IntroPreset[]);
+    } catch {
+      /* presets are optional; ignore load failures */
+    }
   }, []);
 
   const loadLists = useCallback(async (boardId: string) => {
@@ -109,6 +124,7 @@ export default function SettingsPage() {
           loadChannels(),
           loadBoards(),
           loadDriveStatus(),
+          loadPresets(),
         ]);
         if (status.connected) void loadFolders();
       } catch (e) {
@@ -117,7 +133,7 @@ export default function SettingsPage() {
         setLoading(false);
       }
     })();
-  }, [loadChannels, loadBoards, loadDriveStatus, loadFolders]);
+  }, [loadChannels, loadBoards, loadDriveStatus, loadFolders, loadPresets]);
 
   // Surface the result of the Google connect redirect (?drive=connected /
   // ?drive_error=…) once, then clean the URL.
@@ -157,6 +173,8 @@ export default function SettingsPage() {
       drive_folder_id: ch.drive_folder_id ?? '',
       enabled: ch.enabled,
       video_mode: ch.video_mode ?? false,
+      edit_intro_only: ch.edit_intro_only ?? false,
+      intro_preset_id: ch.intro_preset_id ?? '',
     });
     setNotice(null);
     setError(null);
@@ -182,6 +200,8 @@ export default function SettingsPage() {
         drive_folder_id: form.drive_folder_id,
         enabled: form.enabled,
         video_mode: form.video_mode,
+        edit_intro_only: form.edit_intro_only,
+        intro_preset_id: form.intro_preset_id || null,
       };
       const res = await fetch(form.id ? `/api/channels/${form.id}` : '/api/channels', {
         method: form.id ? 'PUT' : 'POST',
@@ -353,17 +373,58 @@ export default function SettingsPage() {
             </label>
           </Field>
 
-          <Field label="Video mode">
-            <label className="inline-flex cursor-pointer items-center gap-2 pt-2 text-sm text-muted">
-              <input
-                type="checkbox"
+          <Field label="Output mode">
+            <div className="flex items-center gap-3 pt-1.5">
+              <Toggle
                 checked={form.video_mode}
-                onChange={(e) => setForm({ ...form, video_mode: e.target.checked })}
-                className="h-4 w-4 accent-brand"
+                onChange={(v) =>
+                  setForm({ ...form, video_mode: v, edit_intro_only: v ? form.edit_intro_only : false })
+                }
               />
-              Build & upload the final video (effect + boom + intro) instead of assets
-            </label>
+              <span className="text-sm font-medium text-ink">
+                {form.video_mode ? 'Build video' : 'Build episode package'}
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-ghost">
+              {form.video_mode
+                ? 'Renders & uploads a finished MP4.'
+                : 'Uploads the generated asset bundle (default).'}
+            </p>
           </Field>
+
+          {form.video_mode && (
+            <Field label="Intro only">
+              <div className="flex items-center gap-3 pt-1.5">
+                <Toggle
+                  checked={form.edit_intro_only}
+                  onChange={(v) => setForm({ ...form, edit_intro_only: v })}
+                />
+                <span className="text-sm font-medium text-ink">
+                  {form.edit_intro_only ? 'Edit the intro only' : 'Build the full video'}
+                </span>
+              </div>
+              <p className="mt-1.5 text-[11px] text-ghost">
+                {form.edit_intro_only
+                  ? 'Skips episode generation — only the edited intro is rendered & uploaded to Drive.'
+                  : 'Generates the full episode and stitches the intro.'}
+              </p>
+            </Field>
+          )}
+
+          {form.video_mode && (
+            <Field label="Intro preset">
+              <Select
+                value={form.intro_preset_id}
+                onChange={(v) => setForm({ ...form, intro_preset_id: v })}
+                options={[
+                  { value: '', label: 'Default (no preset)' },
+                  ...presets.map((p) => ({ value: p.id, label: p.channel ? `${p.channel} · ${p.name}` : p.name })),
+                ]}
+                placeholder="Default (no preset)"
+                emptyLabel="No presets saved yet"
+              />
+            </Field>
+          )}
         </div>
 
         <div className="mt-6 flex items-center gap-3">

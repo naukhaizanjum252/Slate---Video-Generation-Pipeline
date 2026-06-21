@@ -2,11 +2,17 @@
 
 import Link from 'next/link';
 
-type Active = 'dashboard' | 'settings';
+type Active = 'dashboard' | 'settings' | 'editor';
+
+// The intro editor is an ffmpeg-backed service that runs separately (it can't run
+// on Vercel). Its tab appears only when NEXT_PUBLIC_INTRO_EDITOR_URL points at that
+// running editor; the /editor page embeds it.
+export const INTRO_EDITOR_URL = process.env.NEXT_PUBLIC_INTRO_EDITOR_URL?.trim() || '';
 
 const NAV: { key: Active; href: string; label: string }[] = [
   { key: 'dashboard', href: '/', label: 'Dashboard' },
   { key: 'settings', href: '/settings', label: 'Settings' },
+  ...(INTRO_EDITOR_URL ? [{ key: 'editor' as Active, href: '/editor', label: 'Intro Editor' }] : []),
 ];
 
 /**
