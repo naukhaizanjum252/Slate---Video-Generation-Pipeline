@@ -125,3 +125,20 @@ create policy "anon can read channels"
   for select
   to anon
   using (true);
+
+-- ── Realtime: instant retry pickup ──
+-- The watcher subscribes to `episodes` changes filtered to status='queued' so a
+-- dashboard "Retry" is processed immediately instead of on the next poll. The
+-- column filter on UPDATE needs REPLICA IDENTITY FULL, and the table must be in
+-- the supabase_realtime publication. Both statements are idempotent.
+alter table episodes replica identity full;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'episodes'
+  ) then
+    alter publication supabase_realtime add table episodes;
+  end if;
+end $$;

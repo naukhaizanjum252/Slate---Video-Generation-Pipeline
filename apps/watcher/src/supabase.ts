@@ -109,6 +109,33 @@ export class EpisodeStore {
     return (data?.status as EpisodeStatus) ?? null;
   }
 
+  /**
+   * Subscribe to Supabase Realtime for episodes flipping to `queued` (a dashboard
+   * retry) so the watcher can act instantly instead of waiting for the next poll.
+   * Fires `onQueued` on each matching INSERT/UPDATE. Requires the `episodes` table
+   * to be in the `supabase_realtime` publication with REPLICA IDENTITY FULL (see
+   * supabase-schema.sql). Safe to call once at startup; supabase-js auto-rejoins.
+   */
+  subscribeToQueued(onQueued: () => void): void {
+    this.client
+      .channel('slate-queued')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'episodes', filter: 'status=eq.queued' },
+        () => onQueued(),
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'episodes', filter: 'status=eq.queued' },
+        () => onQueued(),
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') log.info('Realtime: watching for queued retries (instant pickup)');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT')
+          log.warn(`Realtime subscription ${status} — retries will fall back to the poll interval`);
+      });
+  }
+
   /** Has the dashboard requested this card be stopped? */
   async isCancelRequested(trelloCardId: string): Promise<boolean> {
     const { data, error } = await this.client

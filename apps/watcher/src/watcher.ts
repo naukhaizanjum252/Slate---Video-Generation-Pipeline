@@ -239,18 +239,34 @@ export function startWatcher(): void {
   log.info(`Polling enabled channels' Trello queues on "${cfg.pollCron}"`);
   log.info(`Processing up to ${cfg.maxConcurrentEpisodes} episode(s) concurrently`);
 
-  // Prevent overlapping ticks from stacking up if a poll runs long.
+  // Single guarded entry point so the cron, the startup poll, and the realtime
+  // trigger never overlap (a poll just discovers + enqueues; it returns fast).
   let running = false;
-  cron.schedule(cfg.pollCron, async () => {
+  const triggerPoll = async (reason: string) => {
     if (running) return;
     running = true;
     try {
       await pollOnce(deps);
     } catch (err) {
-      log.error('Unexpected error in poll cycle', err);
+      log.error(`Unexpected error in poll cycle (${reason})`, err);
     } finally {
       running = false;
     }
+  };
+
+  cron.schedule(cfg.pollCron, () => void triggerPoll('cron'));
+
+  // Instant retry pickup: when a dashboard retry flips a row to `queued`, Supabase
+  // Realtime fires and we poll immediately instead of waiting for the next tick.
+  // Debounced so a burst of changes collapses into one poll; if realtime is down
+  // the cron still picks retries up at the normal interval.
+  let kickTimer: ReturnType<typeof setTimeout> | null = null;
+  deps.store.subscribeToQueued(() => {
+    if (kickTimer) return;
+    kickTimer = setTimeout(() => {
+      kickTimer = null;
+      void triggerPoll('realtime');
+    }, 400);
   });
 
   // Daily cleanup of Gradio temp files to prevent disk exhaustion.
@@ -279,5 +295,5 @@ export function startWatcher(): void {
   });
 
   // Run an immediate first poll so we don't wait a full interval on boot.
-  void pollOnce(deps).catch((err) => log.error('Initial poll failed', err));
+  void triggerPoll('startup');
 }
