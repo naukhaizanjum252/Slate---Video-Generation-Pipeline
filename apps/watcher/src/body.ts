@@ -72,45 +72,52 @@ interface Req extends Required<Omit<BuildBodyOpts, 'srtPath' | 'ctas' | 'ctaOver
 
 /** Render a single still: blurred 16:9 fill + centered sharp image + slow constant zoom + dip fades.
  *
- * Smooth-zoom recipe: use a CONSTANT linear zoom (not oscillating) implemented with the
- * `scale` filter, which interpolates sub-pixels — so even a very slow, very long hold stays
- * buttery (zoompan, by contrast, rounds its crop to integer pixels and visibly steps on slow
- * moves, which read as "shaky"; and oscillating it cycles repeatedly, which reads as "fast").
- * We compose at 2× so the upscaled zoom keeps detail, scale-zoom on a per-frame expression,
- * then crop centre to the target. Direction alternates per still (gentle in / out).
+ * Done in TWO passes for speed:
+ *  - Pass 1 builds the blurred/centered composite as a SINGLE still image. The blur is by far
+ *    the most expensive filter, and it's static — computing it once (not per frame) is the
+ *    difference between seconds and many minutes per clip.
+ *  - Pass 2 applies only the constant linear zoom (via `scale`, which interpolates sub-pixels →
+ *    smooth even on long slow holds; zoompan steps and reads as "shaky") + the dip-to-black
+ *    fades. Direction alternates per still (gentle in / out).
  */
 async function renderStill(still: BodyStill, o: Req, outClip: string): Promise<void> {
   const { width: W, height: H, fps, transitionSec } = o;
   const dur = Math.max(0.5, still.durationSec);
   const N = Math.max(1, Math.round(dur * fps));
   const fade = Math.max(0.15, Math.min(transitionSec / 2, dur / 3));
-  const cW = W * 2;
-  const cH = H * 2; // compose at 2× so the slow zoom keeps detail
-  const fgW = Math.round((cW * 0.86) / 2) * 2; // foreground width, leaving margin for the blurred fill
-  const ZOOM = 0.06; // total zoom travel over the whole still (subtle)
-  const zoomIn = still.index % 2 === 0;
-  const za = zoomIn ? 1.0 : 1 + ZOOM; // start scale
-  const zb = zoomIn ? 1 + ZOOM : 1.0; // end scale
-  const dz = (zb - za).toFixed(5);
-  // Scale the composite to W·Z(n) (interpolated → smooth sub-pixel zoom), then crop centre.
-  const zExpr = `(${za}+(${dz})*n/${Math.max(1, N - 1)})`;
-  const fc = [
+  const fgW = Math.round((W * 0.86) / 2) * 2; // foreground width, leaving margin for the blurred fill
+
+  // Pass 1 — static composite (blur runs ONCE).
+  const composite = `${outClip}.png`;
+  const fc1 = [
     `[0:v]split=2[a][b]`,
-    `[a]scale=${cW}:${cH}:force_original_aspect_ratio=increase,crop=${cW}:${cH},gblur=sigma=70,eq=brightness=-0.40:saturation=0.65[bg]`,
+    `[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},gblur=sigma=45,eq=brightness=-0.40:saturation=0.65[bg]`,
     `[b]scale=${fgW}:-1:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2[fg]`,
     `[bg][fg]overlay=(W-w)/2:(H-h)/2[c]`,
-    `[c]scale=w='ceil((${W}*${zExpr})/2)*2':h=-2:eval=frame:flags=bicubic,crop=${W}:${H},` +
-      `fade=t=in:st=0:d=${fade.toFixed(2)},fade=t=out:st=${(dur - fade).toFixed(2)}:d=${fade.toFixed(2)},setsar=1,format=yuv420p[v]`,
   ].join(';');
+  await run(FFMPEG, ['-y', '-i', still.imagePath, '-filter_complex', fc1, '-map', '[c]', '-frames:v', '1', composite], 10 * 60_000);
+
+  // Pass 2 — constant linear zoom + fades. Per frame this is just a scale+crop (cheap).
+  const ZOOM = 0.06; // total zoom travel over the whole still (subtle)
+  const zoomIn = still.index % 2 === 0;
+  const za = zoomIn ? 1.0 : 1 + ZOOM;
+  const zb = zoomIn ? 1 + ZOOM : 1.0;
+  const dz = (zb - za).toFixed(5);
+  const zExpr = `(${za}+(${dz})*n/${Math.max(1, N - 1)})`;
+  const vf =
+    `scale=w='ceil((${W}*${zExpr})/2)*2':h=-2:eval=frame:flags=bicubic,crop=${W}:${H},` +
+    `fade=t=in:st=0:d=${fade.toFixed(2)},fade=t=out:st=${(dur - fade).toFixed(2)}:d=${fade.toFixed(2)},setsar=1,format=yuv420p`;
   await run(
     FFMPEG,
-    [
-      '-y', '-loop', '1', '-i', still.imagePath,
-      '-filter_complex', fc, '-map', '[v]', '-frames:v', String(N), '-r', String(fps),
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', outClip,
-    ],
-    60 * 60_000, // generous per-still ceiling (a long hold can take a while at 2× supersample)
+    ['-y', '-loop', '1', '-i', composite, '-vf', vf, '-frames:v', String(N), '-r', String(fps),
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', outClip],
+    60 * 60_000,
   );
+  try {
+    fs.unlinkSync(composite);
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Shift an SRT by `deltaSec` (clamping/ dropping cues that fall before 0). */

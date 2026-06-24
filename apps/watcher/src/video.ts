@@ -188,39 +188,45 @@ export async function applyFreezeFlashBoom(
 }
 
 /**
- * Normalize `intro` to the main video's geometry/fps/audio and stitch it onto the
- * FRONT, writing `outPath`. Uses the concat filter so mismatched inputs still
- * join cleanly. If the intro has no audio track, a silent one is synthesized.
+ * Stitch `intro` onto the FRONT of `main`, writing `outPath`.
+ *
+ * Re-encodes ONLY the short intro to the body's exact geometry/fps/codec, then joins by
+ * STREAM COPY via the concat demuxer — so the long body is never re-encoded (prepending a
+ * ~30 s intro shouldn't cost a full re-encode of a 30-min episode). Because the normalized
+ * intro and the body share identical encode settings, the copy-concat is seamless.
  */
 export async function prependIntro(intro: string, main: string, outPath: string): Promise<string> {
   const info = await probeVideo(main);
   const introInfo = await probeVideo(intro);
   const { width: W, height: H, fps } = info;
+  const dir = path.dirname(outPath);
 
-  const args = ['-y', '-i', intro, '-i', main];
-  // Synthesize silent audio for the intro if it has none, so both segments have
-  // an audio stream for the concat filter.
-  let introAudio = '[0:a]';
+  // 1. Normalize the intro to the body's spec (cheap — it's only seconds long).
+  const introNorm = path.join(dir, 'intro_norm.mp4');
+  const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${fps},format=yuv420p`;
+  const nargs = ['-y', '-i', intro];
+  let aMap = '0:a:0';
   if (!introInfo.hasAudio) {
-    args.push('-f', 'lavfi', '-t', String(Math.max(introInfo.duration, 0.1)), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
-    introAudio = '[2:a]';
+    nargs.push('-f', 'lavfi', '-t', String(Math.max(introInfo.duration, 0.1)), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
+    aMap = '1:a:0';
   }
-  const norm = (v: string) =>
-    `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${fps},format=yuv420p`;
-  const filter =
-    `[0:v]${norm('0')}[v0];` +
-    `${introAudio}aformat=sample_rates=48000:channel_layouts=stereo[a0];` +
-    `[1:v]${norm('1')}[v1];` +
-    `[1:a]aformat=sample_rates=48000:channel_layouts=stereo[a1];` +
-    `[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]`;
-  args.push(
-    '-filter_complex', filter,
-    '-map', '[v]', '-map', '[a]',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
-    outPath,
+  nargs.push(
+    '-vf', vf,
+    '-map', '0:v:0', '-map', aMap,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-ar', '48000', '-ac', '2',
+    introNorm,
   );
-  // Re-encodes the whole body to concat — a full episode is long, so a generous ceiling.
-  await run(FFMPEG, args, 90 * 60_000);
-  log.info(`Stitched intro onto front -> ${outPath}`);
+  await run(FFMPEG, nargs, 20 * 60_000);
+
+  // 2. Concat by stream copy — the body passes through untouched.
+  const list = path.join(dir, 'concat_list.txt');
+  const esc = (p: string) => p.replace(/'/g, "'\\''");
+  fs.writeFileSync(list, `file '${esc(introNorm)}'\nfile '${esc(main)}'\n`);
+  await run(FFMPEG, ['-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', outPath], 20 * 60_000);
+
+  try { fs.unlinkSync(introNorm); } catch { /* ignore */ }
+  try { fs.unlinkSync(list); } catch { /* ignore */ }
+  log.info(`Stitched intro (copy-concat) onto front -> ${outPath}`);
   return outPath;
 }
