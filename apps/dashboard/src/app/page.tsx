@@ -457,6 +457,100 @@ function SearchBox({ query, onQuery }: { query: string; onQuery: (q: string) => 
 
 /* ─────────────────────────── Episode list ─────────────────────────── */
 
+/**
+ * Test-edit control for a completed episode: pick a duration and request a real-look
+ * test render. The watcher builds the first N seconds of the body and drops the MP4
+ * into the episode's Drive folder. Reflects test_edit_status as it progresses.
+ */
+const TEST_EDIT_STAGES = ['Downloading bundle', 'Editing intro', 'Rendering body', 'Stitching intro', 'Uploading to Drive'];
+
+/** Live stage progress for an in-flight test edit — shown under the title (like the pipeline's). */
+function TestEditProgress({ ep }: { ep: Episode }) {
+  const stage = ep.test_edit_stage ?? '';
+  const curIdx = TEST_EDIT_STAGES.findIndex((s) => stage.startsWith(s));
+  return (
+    <div className="mt-1.5 flex items-center gap-2 text-[12px] text-muted">
+      <span className="font-medium text-brand-dim">Test edit</span>
+      <span className="flex items-center gap-1">
+        {TEST_EDIT_STAGES.map((s, i) => (
+          <span
+            key={s}
+            title={s}
+            className={`h-1.5 w-1.5 rounded-full transition-colors ${
+              i < curIdx ? 'bg-brand' : i === curIdx ? 'bg-brand animate-pulse' : 'bg-hair'
+            }`}
+          />
+        ))}
+      </span>
+      <span>{stage || 'Queued'}</span>
+    </div>
+  );
+}
+
+function TestEdit({ ep }: { ep: Episode }) {
+  const [secs, setSecs] = useState(180);
+  const [busy, setBusy] = useState(false);
+  const status = ep.test_edit_status;
+  const inFlight = busy || status === 'queued' || status === 'processing';
+  const label =
+    status === 'processing' ? 'Building…' : status === 'queued' || busy ? 'Queued…' : 'Test edit';
+
+  const go = async () => {
+    setBusy(true);
+    try {
+      await fetch(`/api/episodes/${ep.id}/test-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: secs }),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="inline-flex items-center gap-1.5">
+      <select
+        value={secs}
+        onChange={(e) => setSecs(Number(e.target.value))}
+        disabled={inFlight}
+        title="Test edit length"
+        className="rounded-lg border border-hair bg-card px-2 py-1.5 text-xs text-muted disabled:opacity-50"
+      >
+        {[180, 300, 600, 900, 1800].map((s) => (
+          <option key={s} value={s}>
+            {s / 60} min
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={go}
+        disabled={inFlight}
+        title="Build a real-look test edit of the first N seconds and upload it to the episode's Drive folder"
+        className="inline-flex min-w-[5.5rem] items-center justify-center gap-1.5 rounded-lg border border-brand/30 bg-brand-soft px-2.5 py-1.5 text-xs font-medium text-brand-dim transition-colors hover:bg-brand/10 disabled:opacity-50"
+      >
+        {label}
+      </button>
+      {/* Fixed-width result slot so the trash button lines up across every row. */}
+      <span className="w-16 text-right text-xs font-medium">
+        {status === 'done' && ep.test_edit_url ? (
+          <a
+            href={ep.test_edit_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the test edit's Drive folder"
+            className="text-emerald-600 hover:text-emerald-700"
+          >
+            ✓ ready
+          </a>
+        ) : status === 'failed' ? (
+          <span className="text-rose-600">failed</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 function Row({
   ep,
   onStop,
@@ -507,6 +601,7 @@ function Row({
           {isProcessing && (ep.stage || (ep.progress?.length ?? 0) > 0) && (
             <StageProgress stage={ep.stage} steps={ep.progress ?? []} />
           )}
+          {(ep.test_edit_status === 'processing' || ep.test_edit_status === 'queued') && <TestEditProgress ep={ep} />}
           {ep.error_message && (
             <button
               type="button"
@@ -543,6 +638,7 @@ function Row({
             </button>
           ) : (
             <>
+              {ep.status === 'done' && <TestEdit ep={ep} />}
               {(ep.status === 'failed' || ep.status === 'cancelled') && (
                 <button
                   onClick={() => onRemove(ep, 'retry')}
@@ -648,7 +744,7 @@ function EpisodeStepper({ timeline }: { timeline: TimelinePhase[] }) {
       <div className="mb-5 text-[11px] font-semibold uppercase tracking-wider text-ghost">
         Pipeline
       </div>
-      <div className="flex items-start overflow-x-auto pb-1">
+      <div className="no-scrollbar flex items-start overflow-x-auto pb-1">
         {timeline.map((ph, i) => (
           <Fragment key={ph.key}>
             <PhaseColumn phase={ph} index={i} />

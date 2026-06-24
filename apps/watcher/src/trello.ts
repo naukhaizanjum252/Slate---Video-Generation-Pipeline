@@ -42,6 +42,16 @@ export class TrelloClient {
     return data;
   }
 
+  /** Fetch a single card (with attachments) by id — used to re-fetch the intro clip for a test edit. */
+  async getCard(cardId: string): Promise<TrelloCard> {
+    const url = `${API}/cards/${cardId}`;
+    const { data } = await axios.get<TrelloCard>(url, {
+      params: { ...this.auth(), attachments: 'true', fields: 'name,desc,dateLastActivity' },
+      timeout: 30_000,
+    });
+    return data;
+  }
+
   /** Move a card to another list (used to move to the resolve list on done). */
   async moveCard(cardId: string, listId: string): Promise<void> {
     const url = `${API}/cards/${cardId}`;

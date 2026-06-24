@@ -98,6 +98,16 @@ alter table episodes add column if not exists progress jsonb;
 alter table episodes add column if not exists timeline jsonb;
 alter table episodes add column if not exists cancel_requested boolean not null default false;
 
+-- Test-edit: a dashboard button on a completed episode requests an N-second "test
+-- edit" (a real-look body render truncated to N seconds). The watcher picks up rows
+-- where test_edit_status = 'queued', builds it, uploads it into the episode's Drive
+-- folder, and records the link. Added idempotently.
+alter table episodes add column if not exists test_edit_sec integer;
+alter table episodes add column if not exists test_edit_status text;
+alter table episodes add column if not exists test_edit_url text;
+-- Current stage of an in-progress test edit (e.g. "Editing intro", "Rendering body 5/17").
+alter table episodes add column if not exists test_edit_stage text;
+
 create index if not exists episodes_status_idx on episodes(status);
 create index if not exists episodes_created_at_idx on episodes(created_at desc);
 create index if not exists episodes_channel_idx on episodes(channel_id);

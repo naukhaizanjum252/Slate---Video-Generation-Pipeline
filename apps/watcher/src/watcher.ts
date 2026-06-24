@@ -9,6 +9,7 @@ import type { Channel } from '@slate/shared';
 import { runPipeline, type PipelineDeps, type PipelineJob, type JobChannel } from './pipeline';
 import { parseEffect, parseSubjectName } from './effects';
 import { startIntroEditor } from './introEditor';
+import { processPendingTestEdits } from './testEdit';
 
 const log = createLogger('watcher');
 
@@ -301,6 +302,19 @@ export function startWatcher(): void {
     }, 400);
   });
 
+  // Test edits: a dashboard button flips test_edit_status to `queued`. Pick it up
+  // instantly via Realtime (debounced), with the cron tick as a fallback. The
+  // processor is self-guarded so overlapping triggers never run concurrently.
+  let testKick: ReturnType<typeof setTimeout> | null = null;
+  deps.store.subscribeToTestEdits(() => {
+    if (testKick) return;
+    testKick = setTimeout(() => {
+      testKick = null;
+      void processPendingTestEdits(deps);
+    }, 400);
+  });
+  cron.schedule(cfg.pollCron, () => void processPendingTestEdits(deps));
+
   // Daily cleanup of Gradio temp files to prevent disk exhaustion.
   // The Gradio tool accumulates files in /tmp/gradio — previously caused
   // 40GB of disk usage. Runs at 3:00 AM UTC every day.
@@ -328,4 +342,6 @@ export function startWatcher(): void {
 
   // Run an immediate first poll so we don't wait a full interval on boot.
   void triggerPoll('startup');
+  // Drain any test edits requested while the watcher was down.
+  void processPendingTestEdits(deps);
 }

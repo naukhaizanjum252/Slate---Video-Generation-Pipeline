@@ -40,6 +40,14 @@ export interface Episode {
   timeline: TimelinePhase[] | null;
   /** Set by the dashboard's Stop button; the watcher acts on it and cancels. */
   cancel_requested: boolean;
+  /** Test-edit: requested duration in seconds (set by the dashboard button). */
+  test_edit_sec: number | null;
+  /** Test-edit lifecycle: 'queued' | 'processing' | 'done' | 'failed' | null. */
+  test_edit_status: string | null;
+  /** Drive link to the produced test edit (the episode folder it was uploaded into). */
+  test_edit_url: string | null;
+  /** Current stage of an in-progress test edit (e.g. "Editing intro", "Rendering body 5/17"). */
+  test_edit_stage: string | null;
 }
 
 /**

@@ -161,4 +161,72 @@ export class DriveUploader {
     log.info(`Uploaded episode bundle -> ${url}`);
     return url;
   }
+
+  /**
+   * Recursively download a Drive folder's contents into `destDir`, preserving structure.
+   * `opts.skipExt` (lowercase, with dot) skips matching files — e.g. skip prior MP4s
+   * (test edits / the final video) that the body build doesn't need.
+   */
+  async downloadFolderContents(folderId: string, destDir: string, opts?: { skipExt?: string[] }): Promise<void> {
+    await this.ensureAuth();
+    fs.mkdirSync(destDir, { recursive: true });
+    const skip = new Set((opts?.skipExt ?? []).map((e) => e.toLowerCase()));
+    let pageToken: string | undefined;
+    do {
+      const res = await this.drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'nextPageToken, files(id, name, mimeType)',
+        pageSize: 1000,
+        pageToken,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+      });
+      for (const f of res.data.files ?? []) {
+        if (!f.id || !f.name) continue;
+        const dest = path.join(destDir, f.name);
+        if (f.mimeType === FOLDER_MIME) await this.downloadFolderContents(f.id, dest, opts);
+        else if (!skip.has(path.extname(f.name).toLowerCase())) await this.downloadFile(f.id, dest);
+      }
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+  }
+
+  private async downloadFile(fileId: string, dest: string): Promise<void> {
+    const res = await this.drive.files.get(
+      { fileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'stream' },
+    );
+    await new Promise<void>((resolve, reject) => {
+      const w = fs.createWriteStream(dest);
+      const stream = res.data as NodeJS.ReadableStream;
+      stream.pipe(w);
+      w.on('finish', () => resolve());
+      w.on('error', reject);
+      stream.on('error', reject);
+    });
+  }
+
+  /** Upload one file into an existing Drive folder, make it readable, return the folder URL. */
+  async uploadFileIntoFolder(filePath: string, folderId: string): Promise<string> {
+    await this.ensureAuth();
+    const res = await this.drive.files.create({
+      requestBody: { name: path.basename(filePath), parents: [folderId] },
+      media: { mimeType: mimeForFile(filePath), body: fs.createReadStream(filePath) },
+      fields: 'id',
+      supportsAllDrives: true,
+    });
+    if (res.data.id) await this.setPublicRead(res.data.id);
+    const url = `https://drive.google.com/drive/folders/${folderId}`;
+    log.info(`Uploaded ${path.basename(filePath)} into folder ${folderId}`);
+    return url;
+  }
+}
+
+/** Extract a Drive folder id from a folder URL (or pass through an id). */
+export function parseDriveFolderId(urlOrId: string | null | undefined): string | null {
+  if (!urlOrId) return null;
+  const m = urlOrId.match(/folders\/([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  const t = urlOrId.trim();
+  return /^[A-Za-z0-9_-]{10,}$/.test(t) ? t : null;
 }

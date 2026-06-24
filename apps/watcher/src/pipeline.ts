@@ -9,10 +9,11 @@ import { TrelloClient, type TrelloCard, type TrelloAttachment } from './trello';
 import { DriveUploader } from './drive';
 import { EpisodeStore } from './supabase';
 import type { Config } from './config';
-import { applyFreezeFlashBoom, prependIntro, findEpisodeVideo, resolveBoomSfx, probeVideo } from './video';
+import { probeVideo } from './video';
 import { buildIntroSpec } from './intro';
 import { specFromPreset } from './introPreset';
 import { autoCaptionSrt } from './captions';
+import { buildEditedVideo } from './editedVideo';
 
 const log = createLogger('pipeline');
 
@@ -85,14 +86,10 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   let unzipDir: tmp.DirResult | null = null;
 
   // ── Video mode ─────────────────────────────────────────────────────
-  // Per-channel: build the full MP4 (effect + boom + intro) and upload ONLY that
-  // video. `buildVideo` forces the studio's build-video step on (the global env
-  // flag also still works for non-video channels).
+  // Per-channel: after the studio generates the package, build OUR edit (intro + body)
+  // and upload ONLY that final video. The studio no longer builds video.
   const videoMode = job.channel.videoMode;
   const introOnly = videoMode && job.channel.editIntroOnly;
-  const buildVideo = cfg.enableBuildVideo || videoMode;
-  const hasEffect = videoMode && typeof job.effectTimestampSec === 'number' && job.effectTimestampSec > 0;
-  const hasIntro = videoMode && !!job.introAttachment;
 
   // ── Pipeline timeline ──────────────────────────────────────────────
   // Ordered phases for this run. Persisted to Supabase and kept after the run so
@@ -108,11 +105,16 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
         { key: 'Downloading reference', label: 'Reference image' },
         { key: 'Enhancing reference', label: 'Enhance reference' },
         { key: 'Generating script & assets', label: 'Script & assets' },
-        ...(buildVideo ? [{ key: 'Building video', label: 'Build video' }] : []),
         { key: 'Packaging files', label: 'Package files' },
         { key: 'Unpacking bundle', label: 'Unpack bundle' },
-        ...(hasEffect ? [{ key: 'Applying effect', label: 'Effect & boom' }] : []),
-        ...(hasIntro ? [{ key: 'Stitching intro', label: 'Stitch intro' }] : []),
+        // Video mode builds our edit; package mode just uploads the bundle.
+        ...(videoMode
+          ? [
+              { key: 'Editing intro', label: 'Edit intro' },
+              { key: 'Rendering body', label: 'Render body' },
+              { key: 'Stitching intro', label: 'Stitch intro' },
+            ]
+          : []),
         { key: 'Uploading to Drive', label: 'Upload to Drive' },
       ];
   let currentKey = '';
@@ -212,41 +214,38 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     await finalizeDone(driveUrl);
   };
 
-  // Video-mode path: find the built MP4, apply the effect + stitch the intro,
-  // then upload ONLY the final video (in a folder named after the card). Manages
-  // its own temp dir/file cleanup in a local finally.
+  // Video-mode path: build OUR edit (intro + body) from the generated package, then
+  // upload ONLY the final video (in a folder named after the card). This replaces the
+  // studio's /cb_build_video entirely. Manages its own temp cleanup in a local finally.
   const finalizeVideo = async (rootDir: string): Promise<void> => {
-    const mainVideo = findEpisodeVideo(rootDir);
-    if (!mainVideo) {
-      throw new Error(
-        'Video mode: no MP4 found in the built bundle. Confirm the studio build-video step produced a video.',
-      );
-    }
     const work = tmp.dirSync({ prefix: 'slate-video-', unsafeCleanup: true });
     let introFile: tmp.FileResult | null = null;
     try {
-      let current = mainVideo;
-
-      if (hasEffect) {
-        setStage('Applying effect');
-        const fxOut = path.join(work.name, 'fx.mp4');
-        current = await applyFreezeFlashBoom(current, job.effectTimestampSec as number, resolveBoomSfx(), fxOut);
+      // Intro raw clip from the card's video attachment (if any).
+      let introClipPath: string | null = null;
+      if (job.introAttachment) {
+        introFile = tmp.fileSync({ prefix: 'slate-intro-', postfix: guessVideoExt(job.introAttachment) });
+        await trello.downloadAttachment(job.introAttachment, introFile.name);
+        introClipPath = introFile.name;
       }
+      const presetParams = job.channel.introPresetId
+        ? (await store.getIntroPreset(job.channel.introPresetId))?.params ?? null
+        : null;
 
-      if (hasIntro) {
-        setStage('Stitching intro');
-        const intro = job.introAttachment as TrelloAttachment;
-        introFile = tmp.fileSync({ prefix: 'slate-intro-', postfix: guessVideoExt(intro) });
-        await trello.downloadAttachment(intro, introFile.name);
-        const stitched = path.join(work.name, 'final.mp4');
-        current = await prependIntro(introFile.name, current, stitched);
-      }
-
-      // Stage only the final video for upload, named after the card.
       const uploadDir = path.join(work.name, 'upload');
       fs.mkdirSync(uploadDir, { recursive: true });
-      const finalPath = path.join(uploadDir, `${sanitizeFilename(job.cardTitle)}.mp4`);
-      fs.copyFileSync(current, finalPath);
+      const out = path.join(uploadDir, `${sanitizeFilename(job.cardTitle)}.mp4`);
+      await buildEditedVideo({
+        bundleRoot: rootDir,
+        introClipPath,
+        presetParams,
+        outPath: out,
+        workDir: path.join(work.name, 'edit'),
+        onProgress: (s) =>
+          s.startsWith('Rendering body') || s === 'Assembling body'
+            ? setStage('Rendering body', [{ label: 'Body', text: s }])
+            : setStage(s), // 'Editing intro' | 'Stitching intro'
+      });
 
       setStage('Uploading to Drive');
       const driveUrl = await drive.uploadEpisodeFolder(job.cardTitle, uploadDir, job.channel.driveFolderId);
@@ -371,7 +370,6 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
           brief: job.brief,
           imagePath: 'none',
           gradioUrl: cfg.gradio.baseUrl,
-          enableBuildVideo: buildVideo,
           timeoutMin: cfg.probeTimeoutMin,
           downloadOnly: true,
         },
@@ -384,7 +382,9 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
       if (probe.success && fs.existsSync(probe.zip_path)) {
         const { dir, root } = unzipBundle(probe.zip_path);
         unzipDir = dir;
-        if (isCompleteBundle(root, buildVideo)) {
+        // The studio only produces the package; "complete" means the package is present.
+        // Video mode then builds our edit from it in finalize.
+        if (isCompleteBundle(root)) {
           log.info(`♻️  Reusing existing output for "${job.cardTitle}" — skipping generation`);
           await finalize(root);
           return;
@@ -417,7 +417,6 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
         brief: job.brief,
         imagePath: imageTmp.name,
         gradioUrl: cfg.gradio.baseUrl,
-        enableBuildVideo: buildVideo,
         timeoutMin: cfg.pipelineTimeoutMin,
         downloadOnly: false,
       },
@@ -478,7 +477,6 @@ interface PyArgs {
   brief: string;
   imagePath: string;
   gradioUrl: string;
-  enableBuildVideo: boolean;
   timeoutMin: number;
   downloadOnly: boolean;
 }
@@ -517,7 +515,6 @@ function runPythonPipeline(
     '--timeout-min',
     String(args.timeoutMin),
   ];
-  if (args.enableBuildVideo) argv.push('--enable-build-video');
   if (args.downloadOnly) argv.push('--download-only');
 
   return new Promise<PyRunResult>((resolve) => {
@@ -741,7 +738,7 @@ function sanitizeFilename(name: string): string {
  * finished output — never a partial one from a stalled run). Requires the final
  * images, audio, and the episode package; the MP4 too when video build is on.
  */
-function isCompleteBundle(rootDir: string, requireVideo: boolean): boolean {
+function isCompleteBundle(rootDir: string): boolean {
   const files: string[] = [];
   const walk = (d: string) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
@@ -758,12 +755,9 @@ function isCompleteBundle(rootDir: string, requireVideo: boolean): boolean {
   const images = files.filter((f) => /\.(png|jpe?g|webp)$/.test(f)).length;
   const hasAudio = files.some((f) => /\.(mp3|wav)$/.test(f));
   const hasPackage = files.includes('episode_package.json');
-  const hasVideo = files.some((f) => /\.(mp4|mov|webm)$/.test(f));
-  const ok = images >= 15 && hasAudio && hasPackage && (!requireVideo || hasVideo);
+  const ok = images >= 15 && hasAudio && hasPackage;
   if (!ok) {
-    log.info(
-      `Bundle check: images=${images} audio=${hasAudio} package=${hasPackage} video=${hasVideo}`,
-    );
+    log.info(`Bundle check: images=${images} audio=${hasAudio} package=${hasPackage}`);
   }
   return ok;
 }

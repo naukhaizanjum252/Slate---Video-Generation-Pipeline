@@ -52,7 +52,6 @@ def run(
     brief: str,
     image_path: str,
     gradio_url: str,
-    enable_build_video: bool,
     timeout_seconds,  # int seconds, or None for no cap
     download_only: bool = False,
 ) -> dict:
@@ -60,8 +59,9 @@ def run(
     # rather than a raw traceback the parent can't parse.
     from gradio_client import Client, handle_file
 
-    # Total steps depends on whether the final video build is enabled.
-    total = 4 if enable_build_video else 3
+    # The studio only generates the package (script/images/voiceover); the final video
+    # is built on our side from that package. So this is always a 3-step run.
+    total = 3
 
     log(f"Connecting to Gradio at {gradio_url}")
     client = Client(
@@ -141,38 +141,10 @@ def run(
     run_all_status = _index(final, 14)
     log(f"Orchestrated pipeline complete. run_all_status={run_all_status!r}")
 
-    # ── Step 3 (optional): build the final video ─────────────────────────
-    # Disabled by default — current scope is just the asset bundle. Enable with
-    # ENABLE_BUILD_VIDEO=true on the watcher to render the stitched MP4.
-    if enable_build_video:
-        log(f"Step 3/{total}: /cb_build_video")
-        progress("Building video")
-        build_result = client.predict(
-            ep_choice=episode_name,
-            api_name="/cb_build_video",
-        )
-        # Returns: (video_filepath, status_string)
-        video_path = _first(build_result)
-        video_status = _index(build_result, 1)
-        if not video_path:
-            raise RuntimeError(f"Build video step returned no video path: {build_result!r}")
-        log(f"Final video -> {video_path} | status={video_status!r}")
-    else:
-        log("Skipping video build (ENABLE_BUILD_VIDEO is off)")
-
-    # ── Final step: bundle everything into a zip ─────────────────────────
-    download_step = total  # 3 when video disabled, 4 when enabled
-    log(f"Step {download_step}/{total}: /cb_download_all")
-    progress("Packaging files")
-    download_result = client.predict(
-        episode_name=episode_name,
-        api_name="/cb_download_all",
-    )
-    # Returns (zip_filepath, status_string)
-    zip_path = _first(download_result)
-    if not zip_path:
-        raise RuntimeError(f"Download step returned no zip path: {download_result!r}")
-    log(f"Bundle ready -> {zip_path}")
+    # ── Step 3: bundle the package into a zip. The final video (intro + body) is
+    #    built on our side from this package — the studio's build-video step is gone.
+    log(f"Step 3/{total}: /cb_download_all")
+    zip_path = _download_all(client, episode_name)
 
     return {"success": True, "zip_path": zip_path, "episode_name": episode_name}
 
@@ -195,13 +167,24 @@ def _clean(s: str) -> str:
     return " ".join(s.split())[:160]
 
 
+def _download_all(client, episode_name):
+    """Bundle the episode into a zip via /cb_download_all and return its path."""
+    progress("Packaging files")
+    download_result = client.predict(episode_name=episode_name, api_name="/cb_download_all")
+    # Returns (zip_filepath, status_string)
+    zip_path = _first(download_result)
+    if not zip_path:
+        raise RuntimeError(f"Download step returned no zip path: {download_result!r}")
+    log(f"Bundle ready -> {zip_path}")
+    return zip_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bodycam Studio pipeline driver")
     parser.add_argument("--episode-name", required=True)
     parser.add_argument("--brief", required=True)
     parser.add_argument("--image-path", required=True)
     parser.add_argument("--gradio-url", required=True)
-    parser.add_argument("--enable-build-video", action="store_true")
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument("--timeout-min", type=int, default=0)
     args = parser.parse_args()
@@ -216,7 +199,6 @@ def main() -> int:
             args.brief,
             args.image_path,
             args.gradio_url,
-            args.enable_build_video,
             timeout_seconds,
             args.download_only,
         )

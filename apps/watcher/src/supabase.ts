@@ -33,6 +33,13 @@ export class EpisodeStore {
     return data?.refresh_token ?? null;
   }
 
+  /** Fetch one channel by id (used to resolve the intro preset for a test edit). */
+  async getChannel(id: string): Promise<Channel | null> {
+    const { data, error } = await this.client.from('channels').select('*').eq('id', id).maybeSingle();
+    if (error) throw new Error(`Supabase channel lookup failed: ${error.message}`);
+    return (data as Channel) ?? null;
+  }
+
   /** Fetch all enabled channels to poll. */
   async getEnabledChannels(): Promise<Channel[]> {
     const { data, error } = await this.client
@@ -269,5 +276,50 @@ export class EpisodeStore {
       .eq('trello_card_id', trelloCardId);
     if (error) throw new Error(`Supabase markFailed failed: ${error.message}`);
     log.info(`Marked card ${trelloCardId} failed`);
+  }
+
+  /* ── Test edits ── */
+
+  /** Episodes the dashboard requested a test edit for (test_edit_status = 'queued'). */
+  async getPendingTestEdits(): Promise<Episode[]> {
+    const { data, error } = await this.client
+      .from('episodes')
+      .select('*')
+      .eq('test_edit_status', 'queued')
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(`Supabase getPendingTestEdits failed: ${error.message}`);
+    return (data ?? []) as Episode[];
+  }
+
+  /** Update a test edit's lifecycle, current stage, and/or the resulting Drive URL. */
+  async setTestEdit(id: string, fields: { status?: string; url?: string | null; stage?: string | null }): Promise<void> {
+    const update: Record<string, unknown> = {};
+    if (fields.status !== undefined) update.test_edit_status = fields.status;
+    if (fields.url !== undefined) update.test_edit_url = fields.url;
+    if (fields.stage !== undefined) update.test_edit_stage = fields.stage;
+    if (!Object.keys(update).length) return;
+    const { error } = await this.client.from('episodes').update(update).eq('id', id);
+    if (error) throw new Error(`Supabase setTestEdit failed: ${error.message}`);
+  }
+
+  /** Realtime: fire when an episode's test_edit_status flips to 'queued'. */
+  subscribeToTestEdits(onRequest: () => void): void {
+    this.client
+      .channel('slate-test-edits')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'episodes', filter: 'test_edit_status=eq.queued' },
+        () => onRequest(),
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'episodes', filter: 'test_edit_status=eq.queued' },
+        () => onRequest(),
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') log.info('Realtime: watching for test-edit requests');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT')
+          log.warn(`Realtime test-edit subscription ${status} — falling back to poll`);
+      });
   }
 }

@@ -39,3 +39,12 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #b7c2d6;
 }
+
+/* Hide a scrollbar while keeping the element scrollable (e.g. the pipeline stepper). */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE/Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}

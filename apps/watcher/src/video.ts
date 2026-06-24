@@ -216,10 +216,11 @@ export async function prependIntro(intro: string, main: string, outPath: string)
   args.push(
     '-filter_complex', filter,
     '-map', '[v]', '-map', '[a]',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '2',
     outPath,
   );
-  await run(FFMPEG, args);
+  // Re-encodes the whole body to concat — a full episode is long, so a generous ceiling.
+  await run(FFMPEG, args, 90 * 60_000);
   log.info(`Stitched intro onto front -> ${outPath}`);
   return outPath;
 }
