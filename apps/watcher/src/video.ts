@@ -35,8 +35,9 @@ export interface VideoInfo {
 }
 
 /** Spawn ffmpeg/ffprobe and resolve stdout, or reject with a trimmed stderr. */
-export function run(bin: string, args: string[], timeoutMs = 20 * 60_000): Promise<string> {
+export function run(bin: string, args: string[], timeoutMs = 20 * 60_000, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error(`${bin} cancelled`));
     const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
@@ -44,6 +45,15 @@ export function run(bin: string, args: string[], timeoutMs = 20 * 60_000): Promi
       child.kill('SIGKILL');
       reject(new Error(`${bin} timed out after ${Math.round(timeoutMs / 60000)}m`));
     }, timeoutMs);
+    const onAbort = () => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      reject(new Error(`${bin} cancelled`));
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (d) => (out += d.toString()));
     child.stderr.on('data', (d) => (err += d.toString()));
     child.on('error', (e) =>
@@ -51,6 +61,7 @@ export function run(bin: string, args: string[], timeoutMs = 20 * 60_000): Promi
     );
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
       if (code === 0) resolve(out);
       else reject(new Error(`${bin} exited ${code}: ${err.trim().slice(-1400)}`));
     });

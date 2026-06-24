@@ -37,6 +37,7 @@ export interface EditedVideoOpts {
   outPath: string;
   workDir: string;
   onProgress?: (stage: string) => void;
+  isCancelled?: () => boolean | Promise<boolean>; // polled to abort the render (Stop button)
 }
 
 export async function buildEditedVideo(opts: EditedVideoOpts): Promise<string> {
@@ -89,6 +90,7 @@ export async function buildEditedVideo(opts: EditedVideoOpts): Promise<string> {
     outPath: bodyOut,
     workDir: path.join(workDir, 'render'),
     onProgress: opts.onProgress,
+    isCancelled: opts.isCancelled,
   });
 
   // 3. Stitch the intro on the front (or the body is the whole thing).

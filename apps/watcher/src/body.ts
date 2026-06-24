@@ -64,10 +64,18 @@ export interface BuildBodyOpts {
   transitionSec?: number; // dip-to-black total, default 0.8
   onProgress?: (stage: string) => void; // coarse progress ("Rendering body 5/17", "Assembling body")
   concurrency?: number; // parallel still renders (default min(cpus-1, 4))
+  isCancelled?: () => boolean | Promise<boolean>; // polled to abort the render (Stop button)
 }
 
-interface Req extends Required<Omit<BuildBodyOpts, 'srtPath' | 'ctas' | 'ctaOverlayPath' | 'grainPath' | 'onProgress' | 'concurrency'>> {
+interface Req extends Required<Omit<BuildBodyOpts, 'srtPath' | 'ctas' | 'ctaOverlayPath' | 'grainPath' | 'onProgress' | 'concurrency' | 'isCancelled'>> {
   grainPath: string;
+}
+
+class CancelledError extends Error {
+  constructor() {
+    super('Render cancelled');
+    this.name = 'CancelledError';
+  }
 }
 
 /** Render a single still: blurred 16:9 fill + centered sharp image + slow constant zoom + dip fades.
@@ -80,7 +88,7 @@ interface Req extends Required<Omit<BuildBodyOpts, 'srtPath' | 'ctas' | 'ctaOver
  *    smooth even on long slow holds; zoompan steps and reads as "shaky") + the dip-to-black
  *    fades. Direction alternates per still (gentle in / out).
  */
-async function renderStill(still: BodyStill, o: Req, outClip: string): Promise<void> {
+async function renderStill(still: BodyStill, o: Req, outClip: string, signal?: AbortSignal): Promise<void> {
   const { width: W, height: H, fps, transitionSec } = o;
   const dur = Math.max(0.5, still.durationSec);
   const N = Math.max(1, Math.round(dur * fps));
@@ -95,7 +103,7 @@ async function renderStill(still: BodyStill, o: Req, outClip: string): Promise<v
     `[b]scale=${fgW}:-1:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2[fg]`,
     `[bg][fg]overlay=(W-w)/2:(H-h)/2[c]`,
   ].join(';');
-  await run(FFMPEG, ['-y', '-i', still.imagePath, '-filter_complex', fc1, '-map', '[c]', '-frames:v', '1', composite], 10 * 60_000);
+  await run(FFMPEG, ['-y', '-i', still.imagePath, '-filter_complex', fc1, '-map', '[c]', '-frames:v', '1', composite], 10 * 60_000, signal);
 
   // Pass 2 — constant linear zoom + fades. Per frame this is just a scale+crop (cheap).
   const ZOOM = 0.06; // total zoom travel over the whole still (subtle)
@@ -112,6 +120,7 @@ async function renderStill(still: BodyStill, o: Req, outClip: string): Promise<v
     ['-y', '-loop', '1', '-i', composite, '-vf', vf, '-frames:v', String(N), '-r', String(fps),
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', outClip],
     60 * 60_000,
+    signal,
   );
   try {
     fs.unlinkSync(composite);
@@ -163,22 +172,39 @@ export async function buildBody(opts: BuildBodyOpts): Promise<string> {
   fs.mkdirSync(o.workDir, { recursive: true });
   if (!o.stills.length) throw new Error('buildBody: no stills');
 
-  // 1. Render each still to its own clip — pooled across cores (the stills are independent).
-  const clips = o.stills.map((_, i) => path.join(o.workDir, `still_${String(i).padStart(2, '0')}.mp4`));
-  const concurrency = Math.max(1, Math.min(opts.concurrency ?? Math.max(1, (os.cpus()?.length ?? 2) - 1), 4));
-  let done = 0;
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= o.stills.length) return;
-      log.info(`[body] rendering ${o.stills[i].label} (${o.stills[i].durationSec.toFixed(1)}s) -> ${path.basename(clips[i])}`);
-      await renderStill(o.stills[i], o, clips[i]);
-      opts.onProgress?.(`Rendering body ${++done}/${o.stills.length}`);
-    }
+  // Cancellation: poll the Stop flag and abort the active ffmpeg child(ren) when set.
+  const ac = new AbortController();
+  let poller: ReturnType<typeof setInterval> | undefined;
+  if (opts.isCancelled) {
+    poller = setInterval(() => {
+      Promise.resolve(opts.isCancelled!())
+        .then((c) => c && ac.abort())
+        .catch(() => {});
+    }, 2000);
+  }
+  const checkCancel = async () => {
+    if (ac.signal.aborted || (opts.isCancelled && (await opts.isCancelled()))) throw new CancelledError();
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, o.stills.length) }, () => worker()));
-  opts.onProgress?.('Assembling body');
+
+  try {
+    // 1. Render each still to its own clip — pooled across cores (the stills are independent).
+    const clips = o.stills.map((_, i) => path.join(o.workDir, `still_${String(i).padStart(2, '0')}.mp4`));
+    const concurrency = Math.max(1, Math.min(opts.concurrency ?? Math.max(1, (os.cpus()?.length ?? 2) - 1), 4));
+    let done = 0;
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= o.stills.length) return;
+        await checkCancel();
+        log.info(`[body] rendering ${o.stills[i].label} (${o.stills[i].durationSec.toFixed(1)}s) -> ${path.basename(clips[i])}`);
+        await renderStill(o.stills[i], o, clips[i], ac.signal);
+        opts.onProgress?.(`Rendering body ${++done}/${o.stills.length}`);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, o.stills.length) }, () => worker()));
+    await checkCancel();
+    opts.onProgress?.('Assembling body');
 
   // 2. Assemble: concat the clips, screen-blend the looped grain, burn captions, overlay the
   //    CTA subscribe graphic at each CTA window, mux the body slice of the voiceover.
@@ -236,6 +262,9 @@ export async function buildBody(opts: BuildBodyOpts): Promise<string> {
     o.outPath,
   ];
   log.info(`[body] assembling ${clips.length} stills + grain + audio -> ${path.basename(o.outPath)}`);
-  await run(FFMPEG, args, 60 * 60_000);
+  await run(FFMPEG, args, 60 * 60_000, ac.signal);
   return o.outPath;
+  } finally {
+    if (poller) clearInterval(poller);
+  }
 }

@@ -245,6 +245,7 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
           s.startsWith('Rendering body') || s === 'Assembling body'
             ? setStage('Rendering body', [{ label: 'Body', text: s }])
             : setStage(s), // 'Editing intro' | 'Stitching intro'
+        isCancelled: () => store.isCancelRequested(job.cardId),
       });
 
       setStage('Uploading to Drive');
@@ -446,12 +447,18 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
     await finalize(root);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log.error(`❌ Pipeline error for "${job.cardTitle}": ${message}`, err);
-    // Best-effort failure recording — never let these throw out of here.
+    // A cancellation (Stop pressed mid-render → aborted ffmpeg) is not a failure.
+    const cancelled = /cancel/i.test(message) || (await store.isCancelRequested(job.cardId).catch(() => false));
     try {
-      await store.markFailed(job.cardId, message, timelineWith('failed'));
+      if (cancelled) {
+        log.info(`🛑 Cancelled "${job.cardTitle}" during render`);
+        await store.markCancelled(job.cardId, timelineWith('active'));
+      } else {
+        log.error(`❌ Pipeline error for "${job.cardTitle}": ${message}`, err);
+        await store.markFailed(job.cardId, message, timelineWith('failed'));
+      }
     } catch (e) {
-      log.error('Failed to record failure in Supabase', e);
+      log.error('Failed to record final state in Supabase', e);
     }
   } finally {
     // Stop the stage throttle so no trailing write overwrites the final state.
