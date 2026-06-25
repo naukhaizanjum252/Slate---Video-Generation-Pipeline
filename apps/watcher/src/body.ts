@@ -78,55 +78,41 @@ class CancelledError extends Error {
   }
 }
 
-/** Render a single still: blurred 16:9 fill + centered sharp image + slow constant zoom + dip fades.
+/** Build the static composite (blurred 16:9 fill + centered sharp image) as a single PNG.
  *
- * Done in TWO passes for speed:
- *  - Pass 1 builds the blurred/centered composite as a SINGLE still image. The blur is by far
- *    the most expensive filter, and it's static — computing it once (not per frame) is the
- *    difference between seconds and many minutes per clip.
- *  - Pass 2 applies only the constant linear zoom (via `scale`, which interpolates sub-pixels →
- *    smooth even on long slow holds; zoompan steps and reads as "shaky") + the dip-to-black
- *    fades. Direction alternates per still (gentle in / out).
- */
-async function renderStill(still: BodyStill, o: Req, outClip: string, signal?: AbortSignal): Promise<void> {
-  const { width: W, height: H, fps, transitionSec } = o;
-  const dur = Math.max(0.5, still.durationSec);
-  const N = Math.max(1, Math.round(dur * fps));
-  const fade = Math.max(0.15, Math.min(transitionSec / 2, dur / 3));
+ * The blur is by far the most expensive filter and it's static, so we render it ONCE per
+ * image. The zoom + fades are applied later, inline in the single assembly pass — so the
+ * body is encoded only once (no throwaway per-still MP4s). */
+async function renderComposite(still: BodyStill, o: Req, outPng: string, signal?: AbortSignal): Promise<void> {
+  const { width: W, height: H } = o;
   const fgW = Math.round((W * 0.86) / 2) * 2; // foreground width, leaving margin for the blurred fill
-
-  // Pass 1 — static composite (blur runs ONCE).
-  const composite = `${outClip}.png`;
-  const fc1 = [
+  const fc = [
     `[0:v]split=2[a][b]`,
     `[a]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},gblur=sigma=45,eq=brightness=-0.40:saturation=0.65[bg]`,
     `[b]scale=${fgW}:-1:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2[fg]`,
     `[bg][fg]overlay=(W-w)/2:(H-h)/2[c]`,
   ].join(';');
-  await run(FFMPEG, ['-y', '-i', still.imagePath, '-filter_complex', fc1, '-map', '[c]', '-frames:v', '1', composite], 10 * 60_000, signal);
+  await run(FFMPEG, ['-y', '-i', still.imagePath, '-filter_complex', fc, '-map', '[c]', '-frames:v', '1', outPng], 10 * 60_000, signal);
+}
 
-  // Pass 2 — constant linear zoom + fades. Per frame this is just a scale+crop (cheap).
-  const ZOOM = 0.06; // total zoom travel over the whole still (subtle)
+/** The per-image constant-zoom + dip-fade filter chain, applied inline in the assembly pass.
+ * `scale` interpolates sub-pixels → smooth even on long slow holds (zoompan steps → "shaky").
+ * Direction alternates per still (gentle in / out). */
+function zoomChain(still: BodyStill, o: Req, inLabel: string, outLabel: string): string {
+  const { width: W, fps, transitionSec } = o;
+  const dur = Math.max(0.5, still.durationSec);
+  const N = Math.max(1, Math.round(dur * fps));
+  const fade = Math.max(0.15, Math.min(transitionSec / 2, dur / 3));
+  const ZOOM = 0.06;
   const zoomIn = still.index % 2 === 0;
   const za = zoomIn ? 1.0 : 1 + ZOOM;
   const zb = zoomIn ? 1 + ZOOM : 1.0;
   const dz = (zb - za).toFixed(5);
   const zExpr = `(${za}+(${dz})*n/${Math.max(1, N - 1)})`;
-  const vf =
-    `scale=w='ceil((${W}*${zExpr})/2)*2':h=-2:eval=frame:flags=bicubic,crop=${W}:${H},` +
-    `fade=t=in:st=0:d=${fade.toFixed(2)},fade=t=out:st=${(dur - fade).toFixed(2)}:d=${fade.toFixed(2)},setsar=1,format=yuv420p`;
-  await run(
-    FFMPEG,
-    ['-y', '-loop', '1', '-i', composite, '-vf', vf, '-frames:v', String(N), '-r', String(fps),
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-pix_fmt', 'yuv420p', outClip],
-    60 * 60_000,
-    signal,
+  return (
+    `${inLabel}scale=w='ceil((${W}*${zExpr})/2)*2':h=-2:eval=frame:flags=bicubic,crop=${W}:${o.height},` +
+    `fade=t=in:st=0:d=${fade.toFixed(2)},fade=t=out:st=${(dur - fade).toFixed(2)}:d=${fade.toFixed(2)},setsar=1,format=yuv420p${outLabel}`
   );
-  try {
-    fs.unlinkSync(composite);
-  } catch {
-    /* ignore */
-  }
 }
 
 /** Shift an SRT by `deltaSec` (clamping/ dropping cues that fall before 0). */
@@ -187,8 +173,10 @@ export async function buildBody(opts: BuildBodyOpts): Promise<string> {
   };
 
   try {
-    // 1. Render each still to its own clip — pooled across cores (the stills are independent).
-    const clips = o.stills.map((_, i) => path.join(o.workDir, `still_${String(i).padStart(2, '0')}.mp4`));
+    // 1. Build each still's blurred composite as a PNG (blur runs once per image; cheap,
+    //    pooled across cores). The zoom is applied later, inline, so there are no per-still
+    //    video encodes — the body is encoded exactly once.
+    const comps = o.stills.map((_, i) => path.join(o.workDir, `comp_${String(i).padStart(2, '0')}.png`));
     const concurrency = Math.max(1, Math.min(opts.concurrency ?? Math.max(1, (os.cpus()?.length ?? 2) - 1), 4));
     let done = 0;
     let next = 0;
@@ -197,8 +185,8 @@ export async function buildBody(opts: BuildBodyOpts): Promise<string> {
         const i = next++;
         if (i >= o.stills.length) return;
         await checkCancel();
-        log.info(`[body] rendering ${o.stills[i].label} (${o.stills[i].durationSec.toFixed(1)}s) -> ${path.basename(clips[i])}`);
-        await renderStill(o.stills[i], o, clips[i], ac.signal);
+        log.info(`[body] composite ${o.stills[i].label} (${o.stills[i].durationSec.toFixed(1)}s)`);
+        await renderComposite(o.stills[i], o, comps[i], ac.signal);
         opts.onProgress?.(`Rendering body ${++done}/${o.stills.length}`);
       }
     };
@@ -206,64 +194,71 @@ export async function buildBody(opts: BuildBodyOpts): Promise<string> {
     await checkCancel();
     opts.onProgress?.('Assembling body');
 
-  // 2. Assemble: concat the clips, screen-blend the looped grain, burn captions, overlay the
-  //    CTA subscribe graphic at each CTA window, mux the body slice of the voiceover.
-  const inputs: string[] = [];
-  clips.forEach((c) => inputs.push('-i', c));
-  inputs.push('-stream_loop', '-1', '-i', o.grainPath);
-  inputs.push('-ss', o.bodyStartSec.toFixed(3), '-i', o.voiceoverPath);
-  const grainIdx = clips.length;
-  const audioIdx = clips.length + 1;
+    // 2. SINGLE pass: zoom each composite inline → concat → screen-blend grain → burn
+    //    captions → overlay CTA → mux the body slice of the voiceover. One encode total.
+    const { width: W, height: H, fps } = o;
+    const K = o.stills.length;
+    const inputs: string[] = [];
+    o.stills.forEach((s, i) => {
+      const dur = Math.max(0.5, s.durationSec).toFixed(3);
+      inputs.push('-loop', '1', '-framerate', String(fps), '-t', dur, '-i', comps[i]);
+    });
+    inputs.push('-stream_loop', '-1', '-i', o.grainPath);
+    inputs.push('-ss', o.bodyStartSec.toFixed(3), '-i', o.voiceoverPath);
+    const grainIdx = K;
+    const audioIdx = K + 1;
 
-  // CTA overlay: only windows that fall within the rendered length. Each gets its own input,
-  // time-shifted (-itsoffset) so its 8s animation plays from the CTA's start.
-  const ctaPath = opts.ctaOverlayPath ?? resolveCtaOverlay();
-  const ctas = opts.ctas && fs.existsSync(ctaPath) ? opts.ctas.filter((c) => c.startSec < o.bodyDurationSec - 0.5) : [];
-  const ctaBaseIdx = audioIdx + 1;
-  ctas.forEach((c) => inputs.push('-itsoffset', c.startSec.toFixed(3), '-i', ctaPath));
+    // CTA overlay: only windows within the rendered length; each gets its own time-shifted input.
+    const ctaPath = opts.ctaOverlayPath ?? resolveCtaOverlay();
+    const ctas = opts.ctas && fs.existsSync(ctaPath) ? opts.ctas.filter((c) => c.startSec < o.bodyDurationSec - 0.5) : [];
+    const ctaBaseIdx = audioIdx + 1;
+    ctas.forEach((c) => inputs.push('-itsoffset', c.startSec.toFixed(3), '-i', ctaPath));
 
-  const concatIns = clips.map((_, i) => `[${i}:v]`).join('');
-  const fc: string[] = [
-    `${concatIns}concat=n=${clips.length}:v=1:a=0[cat]`,
-    `[${grainIdx}:v]scale=${o.width}:${o.height},setsar=1,format=gbrp[g]`,
-    `[cat]format=gbrp[base]`,
-    `[base][g]blend=all_mode=screen:shortest=1[bl]`,
-    `[bl]format=yuv420p[v0]`,
-  ];
-  let cur = '[v0]';
+    const fc: string[] = [];
+    o.stills.forEach((s, i) => fc.push(zoomChain(s, o, `[${i}:v]`, `[z${i}]`)));
+    fc.push(`${o.stills.map((_, i) => `[z${i}]`).join('')}concat=n=${K}:v=1:a=0[cat]`);
+    fc.push(`[${grainIdx}:v]scale=${W}:${H},setsar=1,format=gbrp[g]`);
+    fc.push(`[cat]format=gbrp[base]`);
+    fc.push(`[base][g]blend=all_mode=screen:shortest=1[bl]`);
+    fc.push(`[bl]format=yuv420p[v0]`);
+    let cur = '[v0]';
 
-  // Captions (optional): shift the full-VO SRT back to the body timeline, then burn.
-  if (opts.srtPath && fs.existsSync(opts.srtPath)) {
-    const cc = path.join(o.workDir, 'body_cc.srt');
-    shiftSrtBy(opts.srtPath, -o.bodyStartSec, cc);
-    fc.push(`${cur}subtitles=filename=${escapeForSubtitles(cc)}:force_style='${CAPTION_STYLE}'[vcc]`);
-    cur = '[vcc]';
-  }
+    if (opts.srtPath && fs.existsSync(opts.srtPath)) {
+      const cc = path.join(o.workDir, 'body_cc.srt');
+      shiftSrtBy(opts.srtPath, -o.bodyStartSec, cc);
+      fc.push(`${cur}subtitles=filename=${escapeForSubtitles(cc)}:force_style='${CAPTION_STYLE}'[vcc]`);
+      cur = '[vcc]';
+    }
 
-  // CTA subscribe graphic: key out the green, scale, centre, show for its 8s (≤ window).
-  const ctaW = Math.round((o.width * 0.62) / 2) * 2;
-  ctas.forEach((c, i) => {
-    const show = Math.min(8, c.durationSec).toFixed(2);
-    fc.push(`[${ctaBaseIdx + i}:v]chromakey=0x00FF1C:0.30:0.12,scale=${ctaW}:-1,setsar=1[cta${i}]`);
-    fc.push(`${cur}[cta${i}]overlay=(W-w)/2:(H-h)/2:enable='between(t,${c.startSec.toFixed(2)},${(c.startSec + Number(show)).toFixed(2)})'[ov${i}]`);
-    cur = `[ov${i}]`;
-  });
+    const ctaW = Math.round((W * 0.62) / 2) * 2;
+    ctas.forEach((c, i) => {
+      const show = Math.min(8, c.durationSec).toFixed(2);
+      fc.push(`[${ctaBaseIdx + i}:v]chromakey=0x00FF1C:0.30:0.12,scale=${ctaW}:-1,setsar=1[cta${i}]`);
+      fc.push(`${cur}[cta${i}]overlay=(W-w)/2:(H-h)/2:enable='between(t,${c.startSec.toFixed(2)},${(c.startSec + Number(show)).toFixed(2)})'[ov${i}]`);
+      cur = `[ov${i}]`;
+    });
 
-  fc.push(`${cur}format=yuv420p[vout]`);
-  const vLabel = '[vout]';
+    fc.push(`${cur}format=yuv420p[vout]`);
 
-  const args = [
-    '-y', ...inputs,
-    '-filter_complex', fc.join(';'),
-    '-map', vLabel, '-map', `${audioIdx}:a`,
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-ar', '48000', '-ac', '2',
-    '-t', o.bodyDurationSec.toFixed(3),
-    o.outPath,
-  ];
-  log.info(`[body] assembling ${clips.length} stills + grain + audio -> ${path.basename(o.outPath)}`);
-  await run(FFMPEG, args, 60 * 60_000, ac.signal);
-  return o.outPath;
+    const args = [
+      '-y', ...inputs,
+      '-filter_complex', fc.join(';'),
+      '-map', '[vout]', '-map', `${audioIdx}:a`,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ar', '48000', '-ac', '2',
+      '-t', o.bodyDurationSec.toFixed(3),
+      o.outPath,
+    ];
+    log.info(`[body] assembling ${K} stills + grain + audio (single pass) -> ${path.basename(o.outPath)}`);
+    await run(FFMPEG, args, 90 * 60_000, ac.signal);
+    comps.forEach((c) => {
+      try {
+        fs.unlinkSync(c);
+      } catch {
+        /* ignore */
+      }
+    });
+    return o.outPath;
   } finally {
     if (poller) clearInterval(poller);
   }

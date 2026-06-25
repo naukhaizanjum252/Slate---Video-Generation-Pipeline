@@ -479,6 +479,33 @@ export async function runPipeline(job: PipelineJob, deps: PipelineDeps): Promise
   }
 }
 
+/**
+ * Fetch an episode's full package from the STUDIO via /cb_download_all and unzip it,
+ * returning the bundle root (or null if the studio no longer has it). This is the
+ * authoritative package source — Drive only holds the package for asset-bundle episodes,
+ * whereas build-video episodes have just the final MP4 on Drive.
+ */
+export async function fetchStudioBundle(episodeName: string, deps: PipelineDeps, destDir: string): Promise<string | null> {
+  const { cfg } = deps;
+  const probe = await runPythonPipeline(
+    {
+      episodeName,
+      brief: '',
+      imagePath: 'none',
+      gradioUrl: cfg.gradio.baseUrl,
+      timeoutMin: cfg.probeTimeoutMin,
+      downloadOnly: true,
+    },
+    cfg.pythonBin,
+    cfg.probeTimeoutMin * 60_000,
+    cfg.probeTimeoutMin * 60_000,
+  );
+  if (!probe.success || !fs.existsSync(probe.zip_path)) return null;
+  fs.mkdirSync(destDir, { recursive: true });
+  new AdmZip(probe.zip_path).extractAllTo(destDir, /* overwrite */ true);
+  return collapseSingleRoot(destDir);
+}
+
 interface PyArgs {
   episodeName: string;
   brief: string;

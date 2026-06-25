@@ -15,7 +15,7 @@ import type { Episode } from '@slate/shared';
 import { buildEditedVideo } from './editedVideo';
 import { parseDriveFolderId } from './drive';
 import { createLogger } from './logger';
-import type { PipelineDeps } from './pipeline';
+import { fetchStudioBundle, type PipelineDeps } from './pipeline';
 
 const log = createLogger('test-edit');
 
@@ -64,11 +64,23 @@ async function runOne(ep: Episode, deps: PipelineDeps): Promise<void> {
   const work = tmp.dirSync({ prefix: 'slate-testedit-', unsafeCleanup: true });
   const stage = (s: string) => store.setTestEdit(ep.id, { stage: s }).catch(() => {});
   try {
-    log.info(`Test edit "${ep.card_title}" — ${sec}s; downloading bundle from Drive folder ${folderId}`);
+    log.info(`Test edit "${ep.card_title}" — ${sec}s`);
     stage('Downloading bundle');
-    const bundle = path.join(work.name, 'bundle');
-    // Skip videos (prior test edits / final MP4) — the edit only needs audio/images/package.
-    await drive.downloadFolderContents(folderId, bundle, { skipExt: ['.mp4', '.mov', '.webm'] });
+    // Prefer the studio's complete package (works for build-video episodes too — their Drive
+    // folder only has the final MP4). Fall back to Drive if the studio no longer has it.
+    let bundle: string | null = null;
+    try {
+      bundle = await fetchStudioBundle(ep.episode_name, deps, path.join(work.name, 'studio'));
+      if (bundle) log.info('Using studio package (/cb_download_all)');
+    } catch (e) {
+      log.warn(`Studio package fetch failed (${e instanceof Error ? e.message : e}) — trying Drive`);
+    }
+    if (!bundle) {
+      log.info(`Studio package unavailable — downloading from Drive folder ${folderId}`);
+      bundle = path.join(work.name, 'bundle');
+      // Skip videos (prior test edits / final MP4) — the edit only needs audio/images/package.
+      await drive.downloadFolderContents(folderId, bundle, { skipExt: ['.mp4', '.mov', '.webm'] });
+    }
 
     const introClipPath = await resolveIntroClip(ep, deps, path.join(work.name, 'introsrc'));
     const presetParams = await resolvePresetParams(ep, deps);
