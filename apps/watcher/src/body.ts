@@ -120,7 +120,7 @@ function shiftSrtBy(srcSrt: string, deltaSec: number, outPath: string): void {
   const txt = fs.readFileSync(srcSrt, 'utf8');
   const toMs = (h: string, m: string, s: string, ms: string) => ((+h * 60 + +m) * 60 + +s) * 1000 + +ms;
   const fmt = (ms: number) => {
-    ms = Math.max(0, ms);
+    ms = Math.round(Math.max(0, ms)); // integer ms — a fractional shift (float bodyStartSec) breaks SRT timestamps → libass dumps raw text
     const h = Math.floor(ms / 3600000); ms -= h * 3600000;
     const m = Math.floor(ms / 60000); ms -= m * 60000;
     const s = Math.floor(ms / 1000); ms -= s * 1000;

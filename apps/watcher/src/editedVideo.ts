@@ -49,6 +49,14 @@ export async function buildEditedVideo(opts: EditedVideoOpts): Promise<string> {
   const vo = await probeVideo(voPath);
   const plan = parseBodyPlan(bundleRoot, vo.duration);
   const srt = opts.srtPath ?? findBundleSrt(bundleRoot);
+  // Debug: surface the bundle layout + the SRT we found, so its real format/wording is visible.
+  try {
+    log.info(`[edit] bundle root=[${fs.readdirSync(bundleRoot).join(', ')}]`);
+    if (srt) log.info(`[edit] SRT ${srt} — first lines:\n${fs.readFileSync(srt, 'utf8').slice(0, 1600)}`);
+    else log.info('[edit] no SRT found in bundle');
+  } catch {
+    /* ignore */
+  }
 
   // 1. Edited intro (optional): intro VO = the intro-line slice of the full voiceover;
   //    pause + subject name come from the script; look from the channel preset.
