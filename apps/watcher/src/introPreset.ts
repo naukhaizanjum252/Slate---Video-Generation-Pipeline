@@ -29,7 +29,7 @@ export function specFromPreset(
   const entrance = num(p.entranceSec, 1.0);
   const exit = num(p.exitSec, 0.9);
   const endTail = num(p.endTailSec, 3.0);
-  const black = num(p.blackSec, 2.0);
+  const black = Math.max(num(p.blackSec, 3.3), 3.3); // ≥ the boom SFX (~3s) so it finishes before the body starts
   const F = entrance + V + exit;
   const s2 = T + F + Math.max(0.1, clip - T);
   const totalD = s2 + black;
@@ -56,10 +56,10 @@ export function specFromPreset(
     Array.isArray(pFlashes) && pFlashes.length
       ? pFlashes.map((f) => ({ atSec: clampN(T + (f.rel ?? 0), T, hi) }))
       : [{ atSec: T }];
-  const glitches =
-    Array.isArray(pGlitches) && pGlitches.length
-      ? pGlitches.map((g) => ({ atSec: clampN(T + (g.rel ?? 0), T, hi), opacity: g.opacity != null ? g.opacity : gOpac }))
-      : [{ atSec: clampN(T + entrance + V, T, hi), opacity: gOpac }];
+  // Glitch fires when the VO ends (the unfreeze), tracking the ACTUAL voiceover length —
+  // not a saved offset (which, tuned for a different VO, fires early). Opacity from the preset.
+  const gOp = Array.isArray(pGlitches) && pGlitches[0]?.opacity != null ? (pGlitches[0].opacity as number) : gOpac;
+  const glitches = [{ atSec: clampN(T + entrance + V, T, hi), opacity: gOp }];
 
   return {
     pauseAtSec: T,

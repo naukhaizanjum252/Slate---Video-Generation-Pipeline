@@ -14,6 +14,7 @@ import { buildBody } from './body';
 import { probeVideo, prependIntro, FFMPEG, run } from './video';
 import { specFromPreset } from './introPreset';
 import { buildIntroSpec } from './intro';
+import { parseSrt, writeSrt } from './srt';
 import { createLogger } from './logger';
 
 const log = createLogger('edit');
@@ -47,8 +48,8 @@ export async function buildEditedVideo(opts: EditedVideoOpts): Promise<string> {
   const voPath = path.join(bundleRoot, 'audio', 'full.mp3');
   if (!fs.existsSync(voPath)) throw new Error('Bundle has no audio/full.mp3 — not a full episode package');
   const vo = await probeVideo(voPath);
-  const plan = parseBodyPlan(bundleRoot, vo.duration);
   const srt = opts.srtPath ?? findBundleSrt(bundleRoot);
+  const plan = parseBodyPlan(bundleRoot, vo.duration, srt);
   // Debug: surface the bundle layout + the SRT we found, so its real format/wording is visible.
   try {
     log.info(`[edit] bundle root=[${fs.readdirSync(bundleRoot).join(', ')}]`);
@@ -75,9 +76,22 @@ export async function buildEditedVideo(opts: EditedVideoOpts): Promise<string> {
       subjectName: plan.subjectName,
       pauseAtSec: plan.pauseAtSec,
     });
-    log.info(`intro: clip=${clipInfo.duration.toFixed(1)}s vo=${voInfo.duration.toFixed(1)}s pause=${plan.pauseAtSec}s name="${plan.subjectName}"`);
+    // Intro captions = only the SRT cues within the intro VO (0..bodyStartSec); buildIntroSpec
+    // shifts them to the voiceover's position on the intro timeline. (The full SRT would leak
+    // body captions into the intro's freeze/tail.)
+    let introSrt: string | null = null;
+    if (srt && fs.existsSync(srt)) {
+      const introCues = parseSrt(srt)
+        .filter((c) => c.startSec < plan.bodyStartSec - 0.05)
+        .map((c) => ({ ...c, endSec: Math.min(c.endSec, plan.bodyStartSec) }));
+      if (introCues.length) {
+        introSrt = path.join(dir, 'intro_cc.srt');
+        writeSrt(introCues, introSrt);
+      }
+    }
+    log.info(`intro: clip=${clipInfo.duration.toFixed(1)}s vo=${voInfo.duration.toFixed(1)}s pause=${plan.pauseAtSec}s name="${plan.subjectName}" captions=${introSrt ? 'yes' : 'no'}`);
     const introOut = path.join(dir, 'intro.mp4');
-    await buildIntroSpec(opts.introClipPath, introVo, spec, introOut, null); // intro captions: pending the SRT
+    await buildIntroSpec(opts.introClipPath, introVo, spec, introOut, introSrt);
     const introInfo = await probeVideo(introOut);
     intro = { path: introOut, dur: introInfo.duration };
   }
